@@ -1,0 +1,19 @@
+dataset = "./data"
+start = "2026-07-22"
+end = "2026-10-22"
+timezone = "Asia/Shanghai"
+qps = 1.0
+batch_size = 1
+blocks_per_partition = 500
+timeout_seconds = 30
+retries = 3
+labels = "./labels.csv"
+system_recipients = ["0x4200000000000000000000000000000000000015"]
+system_depositor = "0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001"
+
+# Supply OPBNB_RPC_URL in the environment, never place credentials here.
+# A token is counted only with an explicitly verified fungible contract/decimals.
+# [assets."0x0000000000000000000000000000000000000000"]
+# symbol = "TEST"
+# decimals = 18
+# verified = true

@@ -1,0 +1,4 @@
+project,transactions,successful_transactions,failed_transactions,successful_senders,direct_recipients
+Alpha,5,4,1,2,2
+Beta,4,3,1,3,1
+Unknown,1,1,0,1,1
