@@ -1,8 +1,11 @@
+import logging
 import threading
 import time
 import math
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+
+logger = logging.getLogger(__name__)
 
 
 class RpcError(RuntimeError):
@@ -89,12 +92,16 @@ class RpcClient:
                 except self.httpx.TransportError:
                     if attempt == self.retries:
                         raise RpcError("transport failure") from None
-                    self.sleep(min(2**attempt, 30))
+                    delay = min(2**attempt, 30)
+                    self._log_retry(pending, attempt, "transport", delay)
+                    self.sleep(delay)
                     continue
                 if response.status_code in (429, 500, 502, 503, 504):
                     if attempt == self.retries:
                         raise RpcError("transient HTTP exhausted")
-                    self.sleep(max(self._retry_after(response), min(2**attempt, 30)))
+                    delay = max(self._retry_after(response), min(2**attempt, 30))
+                    self._log_retry(pending, attempt, f"HTTP_{response.status_code}", delay)
+                    self.sleep(delay)
                     continue
                 if response.status_code != 200:
                     raise RpcError("HTTP rejected", code=response.status_code)
@@ -127,5 +134,12 @@ class RpcClient:
                 if not retry:
                     return [results[item["id"]] for item in items]
                 pending = retry
-                self.sleep(min(2**attempt, 30))
+                delay = min(2**attempt, 30)
+                self._log_retry(pending, attempt, "transient", delay)
+                self.sleep(delay)
             raise RpcError("retry exhausted")
+
+    def _log_retry(self, pending, attempt, reason, delay):
+        methods = ",".join(dict.fromkeys(item["method"] for item in pending))
+        logger.warning("RPC retry: method=%s attempt=%d/%d reason=%s delay_seconds=%.1f",
+                       methods, attempt + 1, self.retries + 1, reason, delay)

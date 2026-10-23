@@ -6,3 +6,4 @@
 - Final fixed source rebuilt and non-editably installed; console demo passed with OPBNB_RPC_URL and PYTHONPATH unset. Source archive excludes caches, build artifacts and generated datasets; example report is supplied separately.
 - Live phases D-E: awaiting actual endpoint; no chain data collected.
 - No Git repository changes or commits authorized.
+- Progress logging fix: complete; 69 tests passed (50 existing + 19 new), compile/offline redirected-output checks passed, independent spec/code review approved. Canonical local project updated with six checksum-verified files. Server patch prepared; actual remote server update/restart remains with the user.

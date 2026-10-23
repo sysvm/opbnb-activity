@@ -44,6 +44,36 @@ tail -f logs/collect.log
 
 需要停止时对该后台进程发 SIGTERM，再用完全相同的命令恢复。尚未完成的分片会重新采集，最多损失当前分片的工作，不会把半分片视作完成。已完成分片先复核哈希。损坏分片保留为隐藏 `.replaced-*` 目录后重写；可在确认无恢复需求后手工清理。单个 run 同时仅运行一个采集进程。
 
+### 实时进度日志与升级已有任务
+
+旧版采集器只在结束时输出 JSON 或错误，没有中间进度日志。因此看到 Parquet 分片持续增长、`nohup` 日志仍为空，是旧代码缺少日志，不能仅凭日志为空判断任务卡住。新版 CLI 使用标准库日志，UTC 时间戳、INFO 级别，输出到 **stderr**，每条立即 flush；上面的 `2>&1` 会将这些日志实时合并到文件，最终 stdout JSON 格式保持不变。
+
+日志包括运行 ID、动作、UTC 窗口、QPS/批大小/分片大小；探测的 chain check、时间窗区块范围解析、能力样本与可选 trace 各阶段；采集开始/结束、每个提交/跳过/恢复分片的 `[start,end)` 范围，以及最终完整性校验开始/结束。RPC 重试记录方法、失败尝试序号、安全原因/HTTP 状态及退避秒数，不打印节点 URL、认证、响应正文或原始异常。QPS 限速等待仍会另行发生。错误保留安全 RPC 分类以及明确列入白名单的固定本地诊断（例如链 ID、身份不匹配、缺少环境变量）；其余仅打印异常类型，避免节点数据进入日志。
+
+例如以下为离线合成 fixture 的进度字段示例（非主网吞吐数据）：
+
+```text
+2026-10-22T00:00:00 UTC INFO Collection partition committed: partition=[102,104) processed_blocks=4/6 committed_blocks=4/6 processed_percent=66.7 committed_percent=66.7 new_blocks=2 new_transactions=2 elapsed_seconds=4.0 rate_blocks_per_second=0.500 eta_seconds=4.0
+```
+
+`processed_blocks` 包含本次完成的区块和已复核的已有分片；`committed_blocks` 只含已经提交或恢复的完整分片。`new_blocks`、`new_transactions` 只累计本次新处理的数据，不重复累计跳过的数据。速率为 `new_blocks / 本次采集已用秒数`，不把历史完成区块算入速率；ETA 用尚未处理的区块数除以该实测速率，没有可用速率时显示 `unknown`，全部完成时为 `0.0`。ETA 是当前观测下的估计，包含未完成分片的处理进度，不包含后续完整性校验/分析耗时；尚未遍历复核的已有分片和未来节点负载变化都会影响估计。
+
+未完成分片内约每 30 秒在**区块完成边界**报告一次，不逐交易刷屏。没有后台心跳线程；单次阻塞 RPC、重试等待、大区块处理或磁盘提交会推迟下一条日志，因此它不是“每 30 秒保证输出”的健康检查。
+
+已经运行的旧进程不会自动加载本次代码修改。服务器升级时按以下顺序操作：
+
+1. 将修改过的 `src/opbnb_activity/{cli,collect,probe,rpc}.py` 同步到原安装项目目录。
+2. 用服务器上的进程信息核对旧任务的完整命令和 PID；**只对确认属于该 run 的旧 PID** 执行 `kill -TERM "$OLD_PID"`。不要使用宽泛的 `pkill`，不要删除数据。
+3. 确认旧 PID 已退出，再在原项目/虚拟环境中按需执行 `.venv/bin/python -m pip install -e . --no-deps`（原本已指向该目录的 editable 安装通常无需重装）。
+4. 使用原来完全相同的 config、run ID、窗口和数据目录恢复，重用原来的 `OPBNB_RPC_URL` 环境变量；日志使用追加重定向保留旧记录：
+
+```bash
+nohup .venv/bin/opbnb-activity collect --config config.toml --run-id full-2026q3 >>logs/collect.log 2>&1 &
+tail -f logs/collect.log
+```
+
+必须等旧任务退出后再启动恢复任务，不能同时对同一 run 启动第二个采集器。已提交分片经过校验后跳过；未完成分片按既有规则重采。升级不改变 manifest 身份、checkpoint、分片布局或指标数据格式。
+
 推荐先另设 run ID、用 `--start` / `--end` 做一天样本，再评估全窗口。默认 **1 个逻辑 RPC 元素/秒、1 个并发 HTTP 请求、batch_size=1、每分片 500 区块**。批大小可显式设为 2–100；此时按元素扣预算、请求前等待 `元素数/qps`，是保守平均预算，但单次批请求仍会有批内突发。工具不会自动加压。三个月数据在 1 QPS 下可能耗时很长；没有任何“探测通过即可达到某吞吐”的承诺。
 
 `probe` 首先检查 chain ID 204，再做时间戳下界二分和有界样本。探测覆盖批处理、block receipts、单交易 receipts、logs、可选能力意义上的 trace。二分使用 `[start,end)`，支持相同/不规则时间戳；不足历史或尚未到结束时间会拒绝采集，不静默截断。archive 不等于 tracing：仅 `-32601` 标为方法 unsupported；pruned/transient 独立记录。Header 覆盖不保证全窗口所有 receipt/state 都可用；采集遇到缺失会阻止该分片完成。trace 仅探测，不参加经济指标。
