@@ -1,78 +1,107 @@
-from .storage import atomic_json
+import json
+
+from .models import TABLES
+from .quality_sql import relational_errors
+from .storage import atomic_json, schema
+
+BATCH_SIZE = 4096
+OPTIONAL_FIELDS = {
+    "blocks": set(),
+    "transactions": {"recipient", "selector"},
+    "receipts": {"gas_used", "effective_gas_price_wei", "l2_fee_wei", "l1_fee_wei", "total_fee_wei", "contract_address"},
+    "logs": set(),
+}
+RANGE_ERROR = "manifest block range incomplete or unexpected partitions"
+
+
+def _inspect_blocks(batch, previous_number, previous_hash, start, end, timestamps, errors):
+    columns = [batch.column(name) for name in ("number", "hash", "parent_hash", "timestamp")]
+    for position in range(batch.num_rows):
+        number, block_hash, parent_hash, timestamp = [column[position].as_py() for column in columns]
+        if previous_number is None or number != previous_number + 1:
+            errors.add("missing/duplicate/out-of-order block")
+        if number is None or not start <= number < end:
+            errors.add(RANGE_ERROR)
+        if previous_hash is not None and parent_hash != previous_hash:
+            errors.add("parent hash discontinuity")
+        if timestamp is None or not timestamps[0] <= timestamp < timestamps[1]:
+            errors.add("block timestamp outside manifest window")
+        previous_number, previous_hash = number, block_hash
+    return previous_number, previous_hash
+
+
+def _inspect_partition(path, start, end, store, counts, previous, timestamps, errors):
+    import pyarrow.compute as compute
+    import pyarrow.parquet as parquet
+
+    metadata = json.loads((path / "_partition.json").read_text())
+    if (metadata["identity"] != store.config.identity
+            or type(metadata["start_block"]) is not int or metadata["start_block"] != start
+            or type(metadata["end_block"]) is not int or metadata["end_block"] != end):
+        errors.add(RANGE_ERROR)
+    for name in TABLES:
+        with parquet.ParquetFile(path / (name + ".parquet")) as reader:
+            schema_matches = reader.schema_arrow.equals(schema(name), check_metadata=False)
+            if not schema_matches:
+                errors.add("typed schema mismatch " + name)
+            observed_rows = 0
+            for batch in reader.iter_batches(batch_size=BATCH_SIZE):
+                if not schema_matches:
+                    observed_rows += batch.num_rows
+                    continue
+                for field in batch.schema.names:
+                    if field not in OPTIONAL_FIELDS[name] and batch.column(field).null_count:
+                        errors.add("null required values " + name)
+                if name == "logs" and compute.list_flatten(batch.column("topics")).null_count:
+                    errors.add("null required values logs")
+                if name == "blocks":
+                    if observed_rows == 0 and batch.num_rows and batch.column("number")[0].as_py() != start:
+                        errors.add(RANGE_ERROR)
+                    previous = _inspect_blocks(batch, *previous, start, end, timestamps, errors)
+                observed_rows += batch.num_rows
+            counts[name] += observed_rows
+            expected_rows = metadata["files"][name]["rows"]
+            if type(expected_rows) is not int or expected_rows != observed_rows or reader.metadata.num_rows != observed_rows:
+                errors.add("metadata row count mismatch " + name)
+            if name == "blocks":
+                if not observed_rows:
+                    errors.add("empty partition " + path.name)
+                if observed_rows != end - start or previous[0] != end - 1:
+                    errors.add(RANGE_ERROR)
+    return previous
 
 
 def validate(store, save=True):
-    errors = []
-    expected_ranges = list(store.ranges())
-    expected_starts = {start for start, _ in expected_ranges}
+    errors = set()
+    counts = {name: 0 for name in TABLES}
+    expected_ranges = dict(store.ranges())
     seen_starts = set()
-    previous_hash = None
-    previous_number = store.start_block - 1
-    counts = {"blocks": 0, "transactions": 0, "receipts": 0, "logs": 0}
-    start_timestamp = int(store.config.start_utc.timestamp())
-    end_timestamp = int(store.config.end_utc.timestamp())
-    for start, end in expected_ranges:
-        if not store.completed(start) and not store.recover(start):
-            errors.append(f"missing/corrupt/incomplete partition [{start},{end})")
+    previous = store.start_block - 1, None
+    timestamps = int(store.config.start_utc.timestamp()), int(store.config.end_utc.timestamp())
+    paths = []
     try:
-        for path, tables in store.iter_partitions():
-            blocks = tables["blocks"]
-            if not blocks:
-                errors.append("empty partition " + path.name)
-                continue
-            partition_start = blocks[0]["number"]
-            seen_starts.add(partition_start)
-            if partition_start not in expected_starts:
-                errors.append("unexpected partition " + path.name)
-            block_by_number = {block["number"]: block for block in blocks}
-            transaction_by_hash = {transaction["hash"]: transaction for transaction in tables["transactions"]}
-            receipt_by_hash = {receipt["transaction_hash"]: receipt for receipt in tables["receipts"]}
-            if len(transaction_by_hash) != len(tables["transactions"]) or len(receipt_by_hash) != len(tables["receipts"]):
-                errors.append("duplicate transaction/receipt hash")
-            if set(transaction_by_hash) != set(receipt_by_hash):
-                errors.append("receipt joins do not cover transactions")
-            transaction_counts = {}
-            for transaction in tables["transactions"]:
-                number = transaction["block_number"]
-                block = block_by_number.get(number)
-                receipt = receipt_by_hash.get(transaction["hash"])
-                transaction_counts[number] = transaction_counts.get(number, 0) + 1
-                if not block or transaction["block_hash"] != block["hash"] or transaction["timestamp"] != block["timestamp"]:
-                    errors.append("transaction block hash/timestamp mismatch")
-                if not receipt or receipt["block_hash"] != transaction["block_hash"] or receipt["block_number"] != number or receipt["transaction_index"] != transaction["transaction_index"]:
-                    errors.append("receipt hash/index mismatch")
-            for block in blocks:
-                if block["number"] != previous_number + 1:
-                    errors.append("missing/duplicate/out-of-order block")
-                if previous_hash is not None and block["parent_hash"] != previous_hash:
-                    errors.append("parent hash discontinuity")
-                if not start_timestamp <= block["timestamp"] < end_timestamp:
-                    errors.append("block timestamp outside manifest window")
-                if transaction_counts.get(block["number"], 0) != block["transaction_count"]:
-                    errors.append("block transaction count mismatch")
-                previous_number, previous_hash = block["number"], block["hash"]
-            seen_logs = set()
-            for log in tables["logs"]:
-                transaction = transaction_by_hash.get(log["transaction_hash"])
-                key = (log["transaction_hash"], log["log_index"])
-                if not transaction or log["block_hash"] != transaction["block_hash"] or log["block_number"] != transaction["block_number"] or key in seen_logs:
-                    errors.append("log hash/join/duplicate mismatch")
-                seen_logs.add(key)
-            for name in counts:
-                counts[name] += len(tables[name])
+        for start, end in expected_ranges.items():
+            if not store.completed(start) and not store.recover(start):
+                errors.add(f"missing/corrupt/incomplete partition [{start},{end})")
+        paths = store.partition_dirs()
+        for path in paths:
+            start, end = [int(bound) for bound in path.name.removeprefix("blocks=").split("-")]
+            if start in seen_starts or expected_ranges.get(start) != end:
+                errors.add("unexpected partition " + path.name)
+                errors.add(RANGE_ERROR)
+            seen_starts.add(start)
+            previous = _inspect_partition(path, start, end, store, counts, previous, timestamps, errors)
+        if paths and not any(error.startswith("typed schema mismatch") for error in errors):
+            connection = store.connection()
+            try:
+                errors.update(relational_errors(connection, paths))
+            finally:
+                connection.close()
     except Exception as error:
-        errors.append("cannot read typed partitions: " + type(error).__name__)
-    if seen_starts != expected_starts or counts["blocks"] != store.end_block - store.start_block:
-        errors.append("manifest block range incomplete or unexpected partitions")
-    if not errors:
-        connection = store.connection()
-        try:
-            for table, key in (("blocks", "hash"), ("transactions", "hash"), ("receipts", "transaction_hash")):
-                if connection.execute(f'SELECT COUNT(*) FROM (SELECT "{key}" FROM {table} GROUP BY "{key}" HAVING COUNT(*)>1)').fetchone()[0]:
-                    errors.append("cross-partition duplicate " + table)
-        finally:
-            connection.close()
-    result = {"ok": not errors, "errors": sorted(set(errors)), "counts": counts,
+        errors.add("cannot read typed partitions: " + type(error).__name__)
+    if seen_starts != set(expected_ranges) or counts["blocks"] != store.end_block - store.start_block:
+        errors.add(RANGE_ERROR)
+    result = {"ok": not errors, "errors": sorted(errors), "counts": counts,
               "identity": store.config.identity, "start_block": store.start_block, "end_block": store.end_block}
     if save:
         atomic_json(store.root / "quality.json", result)

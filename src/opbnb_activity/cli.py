@@ -37,6 +37,8 @@ SAFE_VALUE_ERRORS = {
     "log receipt/hash/index mismatch",
     "Explicit safe run_id required (letters, numbers, underscore, dot, dash)",
     "Invalid bounded RPC settings",
+    "blocks_per_partition must be an integer in [1,100000]",
+    "blocks_per_checkpoint must be an integer in [1,5000]",
     "Asset decimals must be an integer in [0,255]",
     "invalid label validity range",
     "overlapping labels require explicit reconciliation",
@@ -79,9 +81,10 @@ def configure_logging():
 
 
 def log_start(arguments, settings):
-    logger.info("Run start: run_id=%s action=%s start_utc=%s end_utc=%s qps=%s batch_size=%d blocks_per_partition=%d concurrency=%d",
+    logger.info("Run start: run_id=%s action=%s start_utc=%s end_utc=%s qps=%s batch_size=%d blocks_per_partition=%d concurrency=%d blocks_per_checkpoint=%d",
                 settings.run_id, arguments.command, settings.start_utc.isoformat(), settings.end_utc.isoformat(),
-                settings.qps, settings.batch_size, settings.blocks_per_partition, settings.concurrency)
+                settings.qps, settings.batch_size, settings.blocks_per_partition, settings.concurrency,
+                settings.blocks_per_checkpoint)
 
 
 def validate_with_logging(store):

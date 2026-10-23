@@ -1,8 +1,10 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +56,10 @@ class Store:
         self.start_block, self.end_block = start_block, end_block
         self.buffer, self.buffer_start = {name: [] for name in TABLES}, None
         self.buffer_next = None
+        self.buffer_bytes = 0
+        self.batch_start = None
+        self.fragments = None
+        self._durable = {}
         if self.manifest_path.exists():
             self.manifest = json.loads(self.manifest_path.read_text())
             if self.manifest["identity"] != config.identity or self.manifest["start_block"] != start_block or self.manifest["end_block"] != end_block or self.manifest["synthetic"] != synthetic:
@@ -122,7 +128,12 @@ class Store:
         if not task or task["end_block"] != end:
             return False
         path = self.root / task["path"]
-        return self.verify_partition(path, start, end) and digest(path / "_partition.json") == task["checksum"]
+        if not self.verify_partition(path, start, end) or digest(path / "_partition.json") != task["checksum"]:
+            return False
+        self._durable[start] = end
+        from .storage_fragments import Fragments
+        Fragments(self, start, end).cleanup()
+        return True
 
     def recover(self, block_number):
         start, end = self.partition_range(block_number)
@@ -133,53 +144,111 @@ class Store:
         if not self.verify_partition(path, start, end):
             return False
         self.checkpoint.complete(start, end, str(path.relative_to(self.root)), digest(path / "_partition.json"))
+        self._durable[start] = end
+        from .storage_fragments import Fragments
+        Fragments(self, start, end).cleanup()
         return True
 
+    def durable_end(self, block_number):
+        start, _ = self.partition_range(block_number)
+        return self._durable.get(start, start)
+
+    def abort_partition(self):
+        self.buffer = {name: [] for name in TABLES}
+        self.buffer_start = self.buffer_next = self.batch_start = None
+        self.buffer_bytes = 0
+        self.fragments = None
+
+    def resume_partition(self, block_number):
+        from .storage_fragments import Fragments
+        start, end = self.partition_range(block_number)
+        if self.buffer_start is not None:
+            raise ValueError("partition writer already active")
+        self.fragments = Fragments(self, start, end)
+        prefix = self.fragments.resume()
+        self._durable[start] = prefix
+        self.buffer_start, self.buffer_next, self.batch_start = start, prefix, prefix
+        if prefix == end:
+            self._finalize_fragments(start, end)
+            self.abort_partition()
+        return prefix
+
     def write_block(self, block_number, tables):
+        from .storage_fragments import CHECKPOINT_BYTES, Fragments, estimate_bytes
         start, end = self.partition_range(block_number)
         if self.buffer_start is None:
-            if block_number != start:
+            fragments = Fragments(self, start, end)
+            if fragments.root.exists() or fragments.root.is_symlink():
+                self.resume_partition(start)
+            elif block_number != start:
                 raise ValueError("partition must start at its first block")
-            self.buffer_start, self.buffer_next = start, start
+            else:
+                self.fragments = fragments
+                self.buffer_start, self.buffer_next, self.batch_start = start, start, start
+                self._durable[start] = start
         if self.buffer_start != start or self.buffer_next != block_number or len(tables["blocks"]) != 1 or tables["blocks"][0]["number"] != block_number:
             raise ValueError("partition blocks must be ordered and contiguous")
+        block_bytes = estimate_bytes(tables)
         for name in TABLES:
             self.buffer[name].extend(tables[name])
+        self.buffer_bytes += block_bytes
         self.buffer_next += 1
-        if self.buffer_next == end:
+        if self.buffer_next == end and not self.fragments.paths:
             self.commit_partition(start, end, self.buffer)
-            self.buffer, self.buffer_start, self.buffer_next = {name: [] for name in TABLES}, None, None
+            self.abort_partition()
+        elif self.buffer_next == end or self.buffer_next - self.batch_start >= self.config.blocks_per_checkpoint or self.buffer_bytes >= CHECKPOINT_BYTES:
+            self.fragments.publish(self.batch_start, self.buffer_next, self.buffer)
+            self._durable[start] = self.buffer_next
+            logging.getLogger(__name__).info("durable fragment committed start=%d end=%d blocks=%d", self.batch_start, self.buffer_next, self.buffer_next - self.batch_start)
+            self.buffer = {name: [] for name in TABLES}
+            self.buffer_bytes = 0
+            self.batch_start = self.buffer_next
+            if self.buffer_next == end:
+                self._finalize_fragments(start, end)
+                self.abort_partition()
 
     def commit_partition(self, start, end, tables):
-        import pyarrow as arrow
+        from .storage_fragments import write_tables
+        timestamp = tables["blocks"][0]["timestamp"]
+        self._publish_final(start, end, timestamp, lambda directory: write_tables(directory, tables))
+
+    def _finalize_fragments(self, start, end):
         import pyarrow.parquet as parquet
-        day = datetime.fromtimestamp(tables["blocks"][0]["timestamp"], timezone.utc).date().isoformat()
+        from .storage_fragments import concatenate
+        with parquet.ParquetFile(self.fragments.paths[0] / "blocks.parquet") as source:
+            timestamp = next(source.iter_batches(batch_size=1, columns=["timestamp"])).column(0)[0].as_py()
+        self._publish_final(start, end, timestamp, lambda directory: concatenate(directory, self.fragments.paths))
+
+    def _publish_final(self, start, end, timestamp, write_files):
+        from .storage_fragments import Fragments, sync_directory
+        started = time.monotonic()
+        logging.getLogger(__name__).info("Partition finalization start start=%d end=%d", start, end)
+        day = datetime.fromtimestamp(timestamp, timezone.utc).date().isoformat()
         matches = self.partition_matches(start, end)
         if len(matches) > 1:
             raise ValueError("missing or duplicated partition")
         final = matches[0] if matches else self.root / "data" / day / f"{start}-{end}"
         parent = final.parent
         parent.mkdir(parents=True, exist_ok=True)
+        sync_directory(parent.parent)
+        sync_directory(self.root)
         temporary = parent / (".pending-" + uuid.uuid4().hex)
         temporary.mkdir()
         metadata = {"identity": self.config.identity, "start_block": start, "end_block": end, "files": {}}
         try:
-            for name in TABLES:
-                output = temporary / (name + ".parquet")
-                parquet.write_table(arrow.Table.from_pylist(tables[name], schema=schema(name)), output, compression="zstd")
-                with output.open("rb") as handle:
-                    os.fsync(handle.fileno())
-                metadata["files"][name] = {"rows": len(tables[name]), "sha256": digest(output)}
+            metadata["files"] = write_files(temporary)
             atomic_json(temporary / "_partition.json", metadata)
+            sync_directory(temporary)
             if final.exists():
                 os.replace(final, parent / (".replaced-" + uuid.uuid4().hex))
             os.replace(temporary, final)
-            directory_fd = os.open(parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            sync_directory(parent)
+            if not self.verify_partition(final, start, end):
+                raise ValueError("published partition verification failed")
             self.checkpoint.complete(start, end, str(final.relative_to(self.root)), digest(final / "_partition.json"))
+            self._durable[start] = end
+            Fragments(self, start, end).cleanup()
+            logging.getLogger(__name__).info("Partition finalization complete start=%d end=%d elapsed_seconds=%.3f", start, end, time.monotonic() - started)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)

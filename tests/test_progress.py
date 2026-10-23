@@ -64,6 +64,7 @@ def test_resumed_partitions_count_completion_without_inflating_new_rate(tmp_path
     if recovered:
         with store.checkpoint.connection:
             store.checkpoint.connection.execute("DELETE FROM tasks")
+    caplog.clear()
     caplog.set_level(logging.INFO, logger="opbnb_activity")
     collector.collect(FixtureClient(synthetic, clock), store)
     output = messages(caplog)

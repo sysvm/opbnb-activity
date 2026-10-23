@@ -77,7 +77,7 @@ def _ordered_blocks(fetch, start, end, concurrency, pending):
 def collect(client, store, block_receipts=True, batch_supported=True):
     started = last_report = monotonic()
     total = store.end_block - store.start_block
-    processed = committed = new_blocks = new_transactions = 0
+    processed = committed = durable = reused = new_blocks = new_transactions = 0
     concurrency = store.config.concurrency
     pending = deque()
     unsupported_receipts = Event()
@@ -122,12 +122,14 @@ def collect(client, store, block_receipts=True, batch_supported=True):
             "Collection %s: %sprocessed_blocks=%d/%d committed_blocks=%d/%d "
             "processed_percent=%.1f committed_percent=%.1f new_blocks=%d new_transactions=%d "
             "elapsed_seconds=%.1f rate_blocks_per_second=%.3f eta_seconds=%s "
-            "concurrency=%d scheduled_blocks=%d buffered_blocks=%d%s",
+            "concurrency=%d scheduled_blocks=%d buffered_blocks=%d "
+            "blocks_per_checkpoint=%d durable_blocks=%d/%d reused_blocks=%d rpc_blocks_avoided=%d%s",
             event, partition, processed, total, committed, total,
             100 * processed / total if total else 100.0,
             100 * committed / total if total else 100.0,
             new_blocks, new_transactions, elapsed, rate, eta, concurrency, len(pending),
-            sum(future.done() for number, future in pending), rpc_fields,
+            sum(future.done() for number, future in pending), store.config.blocks_per_checkpoint,
+            durable, total, reused, processed - new_blocks, rpc_fields,
         )
 
     logger.info("Collection start: blocks=[%d,%d)", store.start_block, store.end_block)
@@ -137,9 +139,26 @@ def collect(client, store, block_receipts=True, batch_supported=True):
         if completed or store.recover(start):
             processed += end - start
             committed += end - start
+            durable += end - start
             progress("partition skipped" if completed else "partition recovered", start, end)
             continue
-        blocks = _ordered_blocks(fetch, start, end, concurrency, pending)
+        try:
+            resume = store.resume_partition(start)
+        except BaseException:
+            store.abort_partition()
+            raise
+        recovered = resume - start
+        processed += recovered
+        durable += recovered
+        reused += recovered
+        if resume == end:
+            committed += end - start
+        if recovered:
+            progress("checkpoint recovered", start, end)
+        if resume == end:
+            continue
+        partition_durable_end = resume
+        blocks = _ordered_blocks(fetch, resume, end, concurrency, pending)
         try:
             for number, (block, receipts) in blocks:
                 if len(receipts) != len(block["transactions"]) or any(not receipt for receipt in receipts):
@@ -152,14 +171,19 @@ def collect(client, store, block_receipts=True, batch_supported=True):
                 processed += 1
                 new_blocks += 1
                 new_transactions += len(normalized["transactions"])
+                next_durable_end = store.durable_end(number)
+                durable += next_durable_end - partition_durable_end
+                checkpoint_published = next_durable_end > partition_durable_end
+                partition_durable_end = next_durable_end
                 if number + 1 == end:
                     committed += end - start
                     progress("partition committed", start, end)
+                elif checkpoint_published:
+                    progress("checkpoint committed", start, end)
                 elif monotonic() - last_report >= 30:
                     progress("partition in progress", start, end)
         except BaseException:
-            store.buffer = {name: [] for name in store.buffer}
-            store.buffer_start = store.buffer_next = None
+            store.abort_partition()
             raise
         finally:
             blocks.close()

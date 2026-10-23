@@ -23,6 +23,7 @@ class Config:
     concurrency: int = 1
     batch_size: int = 1
     blocks_per_partition: int = 500
+    blocks_per_checkpoint: int = 500
     timeout_seconds: float = 30.0
     retries: int = 3
     labels: str | None = None
@@ -38,7 +39,11 @@ class Config:
             raise ValueError("start must precede end")
         if type(self.concurrency) is not int or not 1 <= self.concurrency <= 128:
             raise ValueError("Invalid bounded RPC settings")
-        if not math.isfinite(self.qps) or self.qps <= 0 or not 1 <= self.batch_size <= 100 or not 1 <= self.blocks_per_partition <= 5000 or self.retries < 0 or self.timeout_seconds <= 0:
+        if type(self.blocks_per_partition) is not int or not 1 <= self.blocks_per_partition <= 100000:
+            raise ValueError("blocks_per_partition must be an integer in [1,100000]")
+        if type(self.blocks_per_checkpoint) is not int or not 1 <= self.blocks_per_checkpoint <= 5000:
+            raise ValueError("blocks_per_checkpoint must be an integer in [1,5000]")
+        if not math.isfinite(self.qps) or self.qps <= 0 or not 1 <= self.batch_size <= 100 or self.retries < 0 or self.timeout_seconds <= 0:
             raise ValueError("Invalid bounded RPC settings")
         self.system_recipients = [value.lower() for value in self.system_recipients]
         self.system_depositor = self.system_depositor.lower()
@@ -63,7 +68,7 @@ class Config:
     @property
     def identity(self):
         settings = asdict(self)
-        for key in ("dataset", "run_id", "qps", "concurrency", "batch_size", "timeout_seconds", "retries", "labels", "assets"):
+        for key in ("dataset", "run_id", "qps", "concurrency", "batch_size", "timeout_seconds", "retries", "labels", "assets", "blocks_per_checkpoint"):
             settings.pop(key)
         settings.update(schema_version=1, chain_id=204)
         return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()

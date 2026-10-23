@@ -46,6 +46,7 @@ python3 -m venv .venv
 - `manifest.json`：运行 ID、配置身份、精确 UTC 窗口、区块结束不含范围、数据来源和 schema 版本。
 - `data/YYYY-MM-DD/START-END/`：每范围一组 `blocks`、`transactions`、`receipts`、`logs` Parquet，外加 `_partition.json` SHA256/行数。例如 `data/2026-10-19/197248677-197249177/`，区块号无补零。
 - `checkpoint.sqlite`：SQLite WAL/FULL 模式的完成分片记录；分片目录原子落盘后再记 checkpoint。中间崩溃可校验并恢复已写分片。
+- `.staging/`：仅当前未完成最终分片的隐藏、已关闭且校验过的 checkpoint fragments；不是最终数据，不参加报表与质量覆盖。最终文件验证并记录 SQLite 后自动清理。
 - `quality.json`、`analysis.json`、中文 `report/summary.md`、`report/technical.md`、18张 CSV 表、`daily.png`、`projects.png`。
 
 目录日期取分片首区块的 UTC 日期，END 为不含的结束区块。仅新写入的分片使用简洁路径；已有 `data/date=YYYY-MM-DD/blocks=START-END/` 目录保持原位置，继续支持读取、恢复和校验，同一 run 可混用两种布局；损坏的已有分片在原路径重写。无需迁移，也没有迁移命令。
@@ -67,7 +68,7 @@ tail -f logs/collect.log
 .venv/bin/opbnb-activity report --config config.toml --run-id full-2026q3
 ```
 
-需要停止时对该后台进程发 SIGTERM，再用完全相同的命令恢复。尚未完成的分片会重新采集，最多损失当前分片的工作，不会把半分片视作完成。已完成分片先复核哈希。损坏分片保留为隐藏 `.replaced-*` 目录后重写；可在确认无恢复需求后手工清理。单个 run 同时仅运行一个采集进程。
+需要停止时对已确认属于该 run 的后台 PID 发 SIGTERM，等待退出后用相同命令恢复。SIGTERM 仍可立即终止；恢复先复核最终分片，再重用当前分片已发布且连续的 durable checkpoint prefix，仅重采未持久化批次及有界预取工作。完整 fragments 即使尚未合成为最终目录也可从磁盘重放；不把半分片视作完成。已完成分片先复核哈希。损坏分片保留为隐藏 `.replaced-*` 目录后重写；可在确认无恢复需求后手工清理。单个 run 同时仅运行一个采集进程。
 
 ### 实时进度日志与升级已有任务
 
@@ -81,7 +82,7 @@ tail -f logs/collect.log
 2026-10-22T00:00:00 UTC INFO Collection partition committed: partition=[102,104) processed_blocks=4/6 committed_blocks=4/6 processed_percent=66.7 committed_percent=66.7 new_blocks=2 new_transactions=2 elapsed_seconds=4.0 rate_blocks_per_second=0.500 eta_seconds=4.0
 ```
 
-`processed_blocks` 包含本次完成的区块和已复核的已有分片；`committed_blocks` 只含已经提交或恢复的完整分片。`new_blocks`、`new_transactions` 只累计本次新处理的数据，不重复累计跳过的数据。速率为 `new_blocks / 本次采集已用秒数`，不把历史完成区块算入速率；ETA 用尚未处理的区块数除以该实测速率，没有可用速率时显示 `unknown`，全部完成时为 `0.0`。ETA 是当前观测下的估计，包含未完成分片的处理进度，不包含后续完整性校验/分析耗时；尚未遍历复核的已有分片和未来节点负载变化都会影响估计。
+`processed_blocks` 包含本次完成的区块、已复核的最终分片和重用的 durable prefix；`committed_blocks` 只含已经提交或恢复的完整最终分片。`durable_blocks` 包含已发布的 fragments 和最终分片；`reused_blocks` 单列本次从 fragments 恢复的 prefix，`rpc_blocks_avoided` 还包含跳过的最终分片。`new_blocks`、`new_transactions` 只累计本次新处理的数据，不重复累计重用数据。日志显示当前 `blocks_per_checkpoint`，每次 durable checkpoint 以及最终合成开始/结束均有进度。速率为 `new_blocks / 本次采集已用秒数`，不把历史完成区块算入速率；ETA 用尚未处理的区块数除以该实测速率，没有可用速率时显示 `unknown`，全部完成时为 `0.0`。ETA 是当前观测下的扫描估计，不包含未来最终合成、完整性校验/分析耗时；尚未遍历复核的已有分片和未来节点负载变化都会影响估计。
 
 未完成分片内约每 30 秒在**区块完成边界**报告一次，不逐交易刷屏。没有后台心跳线程；单次阻塞 RPC、重试等待、大区块处理或磁盘提交会推迟下一条日志，因此它不是“每 30 秒保证输出”的健康检查。
 
@@ -99,13 +100,15 @@ nohup .venv/bin/opbnb-activity collect --config config.toml --run-id full-2026q3
 tail -f logs/collect.log
 ```
 
-必须等旧任务退出后再启动恢复任务，不能同时对同一 run 启动第二个采集器。已提交分片经过校验后跳过；未完成分片按既有规则重采。升级不改变 manifest 身份、checkpoint、已有分片目录或指标数据格式，新分片使用上文的简洁路径。
+必须等旧任务退出后再启动恢复任务，不能同时对同一 run 启动第二个采集器。已提交分片经过校验后跳过；新版本持久化的有效连续 fragments 可复用，升级前未落盘的内存批次仍需重采。升级不改变旧 manifest 身份、SQLite task schema、已有分片目录或指标数据格式，新分片使用上文的简洁路径。
 
 推荐先另设 run ID、用 `--start` / `--end` 做一天样本，再评估全窗口。默认 **1 个逻辑 RPC 元素/秒、concurrency=1、batch_size=1、每分片 500 区块**。`concurrency` 可显式设为 1–128 的整数，控制共享连接池与同时在途的 HTTP 请求数；所有工作线程共享一个 QPS 和 HTTP 429 冷却预算，不会因并发数倍增 QPS。批大小可显式设为 2–100，主要用于不支持整块 receipts 时的逐交易回退；整块 receipts 快速路径不使用该批大小。批请求按元素在发送前扣预算，批内元素仍会同时到达；空闲时间不会积攒额外发送额度。工具不会自动加压。三个月数据在 1 QPS 下可能耗时很长；没有任何“探测通过即可达到某吞吐”的承诺。
 
 需要提高采集速度时，见 [有界并发采集与调参](docs/2026-10-23-high-qps.md)。例如可明确试用 `qps=500`、`concurrency=32`、`batch_size=20`、`blocks_per_partition=500`，根据实测速率、429、超时和内存逐步调整。QPS 可以配置得更高，但这组参数不代表节点已确认容量。QPS/并发数属于运行参数，旧 manifest 缺少并发字段时默认为 1；停掉已确认的旧 PID 并等待退出后，可在保持原 run ID、窗口、分片大小与数据目录的情况下调整 QPS/并发数恢复，无需迁移数据。
 
 离线复现实验：`PYTHONPATH=src python tools/benchmark_collection.py --blocks 120 --latency-ms 10 --concurrency 16 --qps 10000`。它只使用合成 fixture 和 `httpx.MockTransport` 模拟延迟，先验证串行/并发规范化内容及质量计数一致，再输出耗时、区块速率、实际 HTTP 次数与峰值在途数；不会访问生产节点，不承诺实际网络加速比例。
+
+减少最终文件数可在**新 run ID** 中显式设置 `blocks_per_partition=100000`，同时保留 `blocks_per_checkpoint=500`。最终分片范围支持整数 1–100000（默认 500），checkpoint 支持整数 1–5000（默认 500）；布尔值和小数均拒绝。最终大小属于 run 身份，已有 run 不能改大小；checkpoint 是运行参数，可停机后调整恢复，旧 manifest 缺省为 500。无需迁移/合并/重命名旧数据。目录生命周期、临时 I/O 和独立进程基准见 [大分片与细粒度恢复](docs/2026-10-23-large-partitions.md)。
 
 `probe` 首先检查 chain ID 204，再做时间戳下界二分和有界样本。探测覆盖批处理、block receipts、单交易 receipts、logs、可选能力意义上的 trace。二分使用 `[start,end)`，支持相同/不规则时间戳；不足历史或尚未到结束时间会拒绝采集，不静默截断。archive 不等于 tracing：仅 `-32601` 标为方法 unsupported；pruned/transient 独立记录。Header 覆盖不保证全窗口所有 receipt/state 都可用；采集遇到缺失会阻止该分片完成。trace 仅探测，不参加经济指标。
 
@@ -141,7 +144,7 @@ address,project,category,role,source_url,confidence,valid_from,valid_to
 
 质量检查验证：manifest 区块范围、分片校验和、连续编号/父哈希、窗口 UTC 边界、交易数量、receipt 一对一哈希/索引关联、日志关联、跨分片重复。质量失败时 `analyze/report` 拒绝产生最终结论；合法空窗口输出零值和空榜单。
 
-采集每次只处理一个分片；并发读取的运行中及已完成未消费任务合计不超过 `2 * concurrency` 区块，另加当前分片规范化缓冲，500 区块一个范围而非每区块四文件。这是区块数边界，不是严格的字节/RSS 上限；高负载块仍可能大，可降低并发数或降低 `blocks_per_partition`（后者需要新 run ID）。工作线程只取数据，协调线程按区块顺序规范化并写入 Parquet/SQLite；错误会取消排队任务，等待在途工作退出，当前未提交分片在恢复时重采。质量逐分片读取；聚合由 DuckDB 扫描 Parquet、512MB 内存预算并允许落盘；大 uint256 的金额按 4096 行流式读取后精确求和。`Store.read_table` 仅是小 fixture 测试便利接口，生产路径不使用它。没有三个月数据/生产负载基准。当前为单进程有界并发读取和单写入线程，没有多进程并发写入、自动重组回滚、外部对象存储或部署服务。已落盘数据可做内部一致性验证，但离线状态无法独立确认 provider canonical chain；历史重组/节点不一致应新建运行并重新采集。
+采集每次只处理一个最终分片；并发读取的运行中及已完成未消费任务合计不超过 `2 * concurrency` 区块，另加一个 checkpoint 规范化缓冲。缓冲在 `blocks_per_checkpoint` 区块或估算 Arrow payload 64MiB 时于完整区块边界发布；最终分片不再整片存入 Python。单个大区块、Python 对象开销和预取仍可能显著增加 RSS，64MiB 不是总内存保证，可降低 checkpoint 或并发数。工作线程只取数据，协调线程按区块顺序规范化并写入 Parquet/SQLite；错误取消排队任务、等待在途工作退出，并保留已发布 fragments。最终合成和物理质量检查均按最多 4096 行批次读取；跨表/跨分片检查与聚合使用 DuckDB 512MB 预算并允许落盘，这也不是进程 RSS 上限。大 uint256 的金额按 4096 行流式读取后精确求和。`Store.read_table` 仅是小 fixture 测试便利接口，生产路径不使用它。没有三个月生产负载容量保证，合成基准也不证明 16GB 可承载主网全窗口。当前为单进程有界并发读取和单写入线程，没有多进程并发写入、自动重组回滚、外部对象存储或部署服务。已落盘数据可做内部一致性验证，但离线状态无法独立确认 provider canonical chain；历史重组/节点不一致应新建运行并重新采集。
 
 ```bash
 .venv/bin/python -m pytest -q

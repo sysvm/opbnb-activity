@@ -6,6 +6,7 @@ qps = 1.0
 concurrency = 1
 batch_size = 1
 blocks_per_partition = 500
+blocks_per_checkpoint = 500
 timeout_seconds = 30
 retries = 3
 labels = "./labels.csv"
@@ -13,6 +14,8 @@ system_recipients = ["0x4200000000000000000000000000000000000015"]
 system_depositor = "0xdeaddeaddeaddeaddeaddeaddeaddeaddead0001"
 
 # Supply OPBNB_RPC_URL in the environment, never place credentials here.
+# New runs may opt into blocks_per_partition = 100000 with blocks_per_checkpoint = 500.
+# Final partition size is immutable within a run; checkpoint frequency may change on restart.
 # A token is counted only with an explicitly verified fungible contract/decimals.
 # [assets."0x0000000000000000000000000000000000000000"]
 # symbol = "TEST"
