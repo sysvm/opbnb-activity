@@ -79,9 +79,9 @@ def configure_logging():
 
 
 def log_start(arguments, settings):
-    logger.info("Run start: run_id=%s action=%s start_utc=%s end_utc=%s qps=%s batch_size=%d blocks_per_partition=%d",
+    logger.info("Run start: run_id=%s action=%s start_utc=%s end_utc=%s qps=%s batch_size=%d blocks_per_partition=%d concurrency=%d",
                 settings.run_id, arguments.command, settings.start_utc.isoformat(), settings.end_utc.isoformat(),
-                settings.qps, settings.batch_size, settings.blocks_per_partition)
+                settings.qps, settings.batch_size, settings.blocks_per_partition, settings.concurrency)
 
 
 def validate_with_logging(store):
@@ -121,7 +121,8 @@ def main(argv=None):
             endpoint = os.environ.get("OPBNB_RPC_URL")
             if not endpoint:
                 raise ValueError("OPBNB_RPC_URL is required for enrich")
-            client = RpcClient(endpoint, qps=settings.qps, timeout=settings.timeout_seconds, retries=settings.retries, batch_size=settings.batch_size)
+            client = RpcClient(endpoint, qps=settings.qps, timeout=settings.timeout_seconds, retries=settings.retries,
+                               batch_size=settings.batch_size, concurrency=settings.concurrency)
             metadata = None
             try:
                 if os.environ.get("OPBNB_CONTRACT_API_URL"):
@@ -174,7 +175,8 @@ def main(argv=None):
         endpoint = os.environ.get("OPBNB_RPC_URL")
         if not endpoint:
             raise ValueError("OPBNB_RPC_URL is required only for probe/collect")
-        client = RpcClient(endpoint, qps=settings.qps, timeout=settings.timeout_seconds, retries=settings.retries, batch_size=settings.batch_size)
+        client = RpcClient(endpoint, qps=settings.qps, timeout=settings.timeout_seconds, retries=settings.retries,
+                           batch_size=settings.batch_size, concurrency=settings.concurrency)
         try:
             logger.info("Probe start")
             capabilities = probe(client, int(settings.start_utc.timestamp()), int(settings.end_utc.timestamp()))

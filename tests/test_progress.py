@@ -138,7 +138,9 @@ def test_retry_logs_only_method_attempt_safe_reason_and_delay(caplog, failure):
         payload = json.loads(request.content)
         return httpx.Response(200, json={"id": payload["id"], "result": "ok"})
     caplog.set_level(logging.WARNING, logger="opbnb_activity")
-    client = module("rpc").RpcClient("https://user:password@node.invalid/private?key=SECRET", transport=httpx.MockTransport(handler), sleep=lambda seconds: None)
+    clock = Clock()
+    client = module("rpc").RpcClient("https://user:password@node.invalid/private?key=SECRET", transport=httpx.MockTransport(handler),
+                                     clock=clock, sleep=lambda seconds: setattr(clock, "now", clock.now + seconds))
     try:
         assert client.call("eth_chainId", []) == "ok"
     finally:

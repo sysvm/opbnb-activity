@@ -3,6 +3,7 @@ start = "2026-07-22"
 end = "2026-10-22"
 timezone = "Asia/Shanghai"
 qps = 1.0
+concurrency = 1
 batch_size = 1
 blocks_per_partition = 500
 timeout_seconds = 30
