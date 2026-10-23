@@ -1,0 +1,13 @@
+data/
+.env
+.DS_Store
+.vscode/
+.idea/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

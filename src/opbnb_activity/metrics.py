@@ -4,8 +4,11 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .activity_metrics import augment
 from .decode import decimal_units, decode_transfer
+from .enrichment import augment_result
 from .labels import LabelIndex
+from .registry import prepare_inputs
 from .quality import validate
 from .storage import atomic_json, digest
 
@@ -27,6 +30,7 @@ def analyze(store, labels, assets, save=True):
     quality = validate(store)
     if not quality["ok"]:
         raise ValueError("quality checks failed; incomplete data cannot produce final analytics")
+    labels, assets, provenance = prepare_inputs(store, labels, assets)
     index = LabelIndex(labels)
     connection = store.connection()
     label_schema = arrow.schema([("address", arrow.string()), ("project", arrow.string()), ("category", arrow.string()),
@@ -119,10 +123,10 @@ def analyze(store, labels, assets, save=True):
         summary["l2_fee_coverage"] = (summary["transactions"] - summary["unknown_l2_fee_transactions"]) / summary["transactions"] if summary["transactions"] else None
         project_counts = [row["transactions"] for row in result["projects"] if row["project"] != "Unknown"]
         summary["unknown_project_share"] = summary["unknown_project_transactions"] / non_system if non_system else None
-        summary["project_top1_share"] = (project_counts[0] if project_counts else 0) / non_system if non_system else None
-        summary["project_top5_share"] = sum(project_counts[:5]) / non_system if non_system else None
-        summary["project_top10_share"] = sum(project_counts[:10]) / non_system if non_system else None
-        summary["project_hhi"] = sum((count / non_system) ** 2 for count in project_counts) if non_system else None
+        summary["project_top1_share"] = project_counts[0] / non_system if non_system and project_counts else None
+        summary["project_top5_share"] = sum(project_counts[:5]) / non_system if non_system and project_counts else None
+        summary["project_top10_share"] = sum(project_counts[:10]) / non_system if non_system and project_counts else None
+        summary["project_hhi"] = sum((count / non_system) ** 2 for count in project_counts) if non_system and project_counts else None
         top_sender_count = (summary["unique_successful_senders"] + 99) // 100
         top_sender_transactions = connection.execute("""SELECT coalesce(sum(tx_count),0) FROM
             (SELECT count(*) AS tx_count FROM activity WHERE status=1 AND NOT is_system
@@ -136,6 +140,8 @@ def analyze(store, labels, assets, save=True):
                               "dataset_version": hashlib.sha256("".join(digest(path / "_partition.json") for path in store.partition_dirs()).encode()).hexdigest(),
                               "labels_version": index.version, "assets_version": hashlib.sha256(json.dumps(assets, sort_keys=True).encode()).hexdigest(),
                               "dataset": ".", "identity": store.config.identity}
+        augment(connection, result, store)
+        augment_result(connection, result, store, dict(provenance, labels=labels), assets)
         if save:
             atomic_json(store.root / "analysis.json", result)
         return result

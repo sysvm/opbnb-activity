@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -86,11 +87,18 @@ class Store:
         return start, min(start + self.config.blocks_per_partition, self.end_block)
 
     def partition_dirs(self):
-        return sorted(self.root.glob("data/date=*/blocks=*"), key=lambda path: int(path.name.split("=")[1].split("-")[0]))
+        patterns = ("data/date=????-??-??/blocks=[0-9]*-[0-9]*", "data/????-??-??/[0-9]*-[0-9]*")
+        matches = [path for pattern in patterns for path in self.root.glob(pattern)
+                   if path.is_dir() and re.fullmatch(r"[0-9]+-[0-9]+", path.name.removeprefix("blocks="))]
+        return sorted(matches, key=lambda path: int(path.name.removeprefix("blocks=").split("-")[0]))
+
+    def partition_matches(self, start, end):
+        patterns = (f"data/date=????-??-??/blocks={start:012d}-{end:012d}", f"data/????-??-??/{start}-{end}")
+        return [path for pattern in patterns for path in self.root.glob(pattern) if path.is_dir()]
 
     def block_dir(self, block_number):
         start, end = self.partition_range(block_number)
-        matches = list(self.root.glob(f"data/date=*/blocks={start:012d}-{end:012d}"))
+        matches = self.partition_matches(start, end)
         if len(matches) != 1:
             raise ValueError("missing or duplicated partition")
         return matches[0]
@@ -146,9 +154,12 @@ class Store:
         import pyarrow as arrow
         import pyarrow.parquet as parquet
         day = datetime.fromtimestamp(tables["blocks"][0]["timestamp"], timezone.utc).date().isoformat()
-        parent = self.root / "data" / ("date=" + day)
+        matches = self.partition_matches(start, end)
+        if len(matches) > 1:
+            raise ValueError("missing or duplicated partition")
+        final = matches[0] if matches else self.root / "data" / day / f"{start}-{end}"
+        parent = final.parent
         parent.mkdir(parents=True, exist_ok=True)
-        final = parent / f"blocks={start:012d}-{end:012d}"
         temporary = parent / (".pending-" + uuid.uuid4().hex)
         temporary.mkdir()
         metadata = {"identity": self.config.identity, "start_block": start, "end_block": end, "files": {}}

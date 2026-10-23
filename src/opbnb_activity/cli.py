@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .collect import collect
 from .config import load
+from .enrichment import ContractMetadataClient, enrich
 from .labels import load_labels
 from .metrics import analyze
 from .models import normalize_block
@@ -56,6 +57,9 @@ SAFE_VALUE_ERRORS = {
     "quality checks failed; incomplete data cannot produce final analytics",
     "OPBNB_RPC_URL is required only for probe/collect",
     "Historical coverage unavailable; collection not started",
+    "OPBNB_RPC_URL is required for enrich",
+    "synthetic enrichment refuses live network",
+    "top must be in [1,100]",
 }
 
 
@@ -90,7 +94,7 @@ def validate_with_logging(store):
 def parser():
     result = argparse.ArgumentParser(description="Auditable opBNB activity analytics; demo uses SYNTHETIC data")
     commands = result.add_subparsers(dest="command", required=True)
-    for name in ("probe", "collect", "validate", "analyze", "report", "demo"):
+    for name in ("probe", "collect", "validate", "analyze", "report", "demo", "enrich"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path)
         command.add_argument("--dataset", type=Path)
@@ -98,6 +102,9 @@ def parser():
         if name in ("probe", "collect"):
             command.add_argument("--start")
             command.add_argument("--end")
+        if name == "enrich":
+            command.add_argument("--top", type=int, choices=range(1, 101), default=20, metavar="1..100", help="maximum recipients and Transfer emitters each (default: 20)")
+            command.add_argument("--refresh", action="store_true", help="redo successful cached observations; failures always retry")
     return result
 
 
@@ -105,6 +112,28 @@ def main(argv=None):
     arguments = parser().parse_args(argv)
     configure_logging()
     try:
+        if arguments.command == "enrich":
+            settings = load(arguments.config, dataset=arguments.dataset, run_id=arguments.run_id)
+            store = Store.open(settings.dataset, arguments.run_id)
+            log_start(arguments, settings)
+            if store.manifest["synthetic"]:
+                raise ValueError("synthetic enrichment refuses live network")
+            endpoint = os.environ.get("OPBNB_RPC_URL")
+            if not endpoint:
+                raise ValueError("OPBNB_RPC_URL is required for enrich")
+            client = RpcClient(endpoint, qps=settings.qps, timeout=settings.timeout_seconds, retries=settings.retries, batch_size=settings.batch_size)
+            metadata = None
+            try:
+                if os.environ.get("OPBNB_CONTRACT_API_URL"):
+                    metadata = ContractMetadataClient(os.environ["OPBNB_CONTRACT_API_URL"], qps=settings.qps,
+                        timeout=settings.timeout_seconds, retries=settings.retries)
+                result = enrich(store, client, top=arguments.top, refresh=arguments.refresh, metadata=metadata)
+                print(json.dumps({"status": result["status"], "recipients": len(result["targets"]["recipients"]), "tokens": len(result["targets"]["tokens"])}))
+                return 0
+            finally:
+                client.close()
+                if metadata:
+                    metadata.close()
         if arguments.command in ("validate", "analyze", "report"):
             settings = load(arguments.config, dataset=arguments.dataset, run_id=arguments.run_id)
             store = Store.open(settings.dataset, arguments.run_id)

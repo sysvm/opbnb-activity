@@ -114,7 +114,7 @@ def test_partition_commit_is_atomic_and_bounded(tmp_path, synthetic):
     for block in synthetic["blocks"][1:]:
         store.write_block(int(block["number"], 16), normalize(block, synthetic["receipts"], config.system_recipients))
     assert len(store.partition_dirs()) == 3
-    assert len(list(store.root.glob("data/date=*/blocks=*/*.parquet"))) == 12
+    assert len(list(store.root.glob("data/????-??-??/*-*/*.parquet"))) == 12
     assert store.completed(101) is True
     assert module("quality").validate(store)["ok"] is True
 
