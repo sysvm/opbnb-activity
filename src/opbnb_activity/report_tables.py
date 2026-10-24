@@ -8,7 +8,23 @@ FEE_FIELDS = [field for component in ("l1", "l2", "total") for field in (
     f"known_{component}_fee_transactions", f"missing_{component}_fee_transactions", f"{component}_fee_coverage",
     f"known_{component}_fee_wei", f"known_{component}_fee_bnb")]
 PERIOD_FIELDS = ["period_start", "active_senders", "all_non_system_senders", "observed_days", "expected_days", "is_partial"]
+ACTIVITY_FIELDS = ["transactions", "successful_transactions", "failed_transactions", "active_senders"]
+SENDER_FIELDS = ["transactions", "successful_transactions", "failed_transactions", "empty_calldata_transactions",
+    "unique_recipients", "successful_active_days", "zero_value_transactions", "nonzero_value_transactions",
+    "attempted_value_wei", "successful_value_wei", "failure_rate"]
 TABLE_FIELDS = {
+    "daily_projects": ["day", "project", *ACTIVITY_FIELDS],
+    "daily_recipients": ["day", "recipient_group", "recipient", *ACTIVITY_FIELDS],
+    "daily_changes": ["day", "dimension", "project", "recipient_group", "recipient", "transactions",
+        "previous_transactions", "delta_transactions", "growth_rate", "contribution_rank"],
+    "sender_profiles": ["sender", *SENDER_FIELDS, "first_timestamp", "last_timestamp", "min_gap_seconds",
+        "max_gap_seconds", "mean_gap_seconds", "median_gap_seconds"],
+    "sender_daily": ["day", "sender", *SENDER_FIELDS],
+    "sender_overlap": ["sender_a", "sender_b", "shared_recipients", "union_recipients", "jaccard"],
+    "failure_methods": ["recipient", "selector", "transactions", "failed_transactions", "failure_rate",
+        "all_failed_transactions", "share_of_failures"],
+    "failure_samples": ["recipient", "selector", "transaction_hash", "block_number", "transaction_index",
+        "timestamp", "day", "sender", "status", "value_wei", "sample_rank", "revert_evidence"],
     "daily": ["day", "transactions", "successful_transactions", "failed_transactions", "system_transactions",
         "active_senders", "all_non_system_senders", "native_value_wei", "native_value_bnb", "known_total_fee_wei",
         "partial_l2_fee_wei", "unknown_total_fee_transactions", "unknown_l2_fee_transactions", "full_fee_coverage",
@@ -27,7 +43,7 @@ TABLE_FIELDS = {
     "recipient_concentration": ["top_n", "transactions", "share"],
     "sender_concentration": ["top_n", "transactions", "share"],
     "sender_breakdown": ["sender", "dimension", "key", "transactions", "total_transactions", "share"],
-    "recipient_details": ["address", "transactions", "historical_kind", "project", "category", "role", "source_url",
+    "recipient_details": ["address", "transactions", "historical_kind", "code_observation_scope", "project", "category", "role", "source_url",
         "confidence", "temporal_scope", "label_scope", "sample_first_block", "sample_first_block_hash", "sample_first_kind",
         "sample_first_status", "sample_first_code_hash", "sample_last_block", "sample_last_block_hash", "sample_last_kind",
         "sample_last_status", "sample_last_code_hash", "current_contract_name", "abi_status"],
@@ -37,6 +53,7 @@ TABLE_FIELDS = {
     "events": ["address", "topic0", "log_count", "transactions", "eligible_log_count", "share", "signature_candidates", "signature_evidence"],
 }
 TEXT_FIELDS = {"day", "address", "project", "role", "category", "sender", "period_start", "cohort_day",
+    "recipient_group", "sender_a", "sender_b", "transaction_hash", "revert_evidence", "code_observation_scope",
     "transaction_type", "recipient", "selector", "signature_candidates", "signature_evidence", "hour_utc", "hour",
     "fee_group", "dimension", "key", "historical_kind", "source_url", "confidence", "temporal_scope", "label_scope",
     "sample_first_block_hash", "sample_first_kind", "sample_first_status", "sample_first_code_hash", "sample_last_block_hash",

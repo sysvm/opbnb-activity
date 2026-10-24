@@ -7,6 +7,7 @@ from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 from .decode import decimal_units
+from .attribution_report import attribution_section
 from .metrics import analyze
 from .report_tables import TABLE_FIELDS, export_tables
 
@@ -164,6 +165,8 @@ Top 1% 成功非系统发送地址（向上取整 {number(summary['top1_percent_
 
 发送方目标、selector、小时分布见 [sender_breakdown.csv](sender_breakdown.csv)（Top20 发送方，各维度最多20项），高频不等于机器人或恶意行为。项目间地址重叠，不可把项目去重地址直接相加。
 
+{attribution_section(result, table, number, percent, cell, short_address)}
+
 ## 资金与成本
 
 {tokens}
@@ -221,6 +224,14 @@ def technical_appendix(result, store):
         "token_metadata": "Transfer emitter Top100；verified_fungible 才能计入金额，observed_unverified 仅元数据观测；log_count 可包含 NFT歧义日志",
         "unresolved": "Top100 接收地址中未匹配项目的影响排序及查询状态，不是全部未知地址清单",
         "events": "成功非系统交易日志的 emitter/topic0 Top100；share 分母为所有合格日志 eligible_log_count，transactions 为组内交易去重",
+        "daily_projects": "全部项目×本地日，显式 Unknown，零活动补行；成功发送地址组内去重，项目间不可相加",
+        "daily_recipients": "全窗口固定 Top20 接收地址×日，另列 Other 和创建交易；各日交易数可与 daily 对齐",
+        "daily_changes": "project/recipient 两套独立的日交易变化贡献；首日差额 N/A、前日零时增长率 N/A；排名按绝对变化",
+        "sender_profiles": "全窗口 Top20 非系统 sender 完整统计；精确尝试/成功 value，时间戳间隔统计，非机器人结论",
+        "sender_daily": "所选 Top20 sender×全本地日，零活动补行；接收地址排除 to 为空，包含失败尝试",
+        "sender_overlap": "所选 sender 无重复配对，最多190组；不同接收对象的交并比，排除创建交易，空并集 Jaccard N/A",
+        "failure_methods": "recipient×selector 失败数 Top20；组内失败率分母为该组全部非系统交易，全网份额分母为所有非系统失败",
+        "failure_samples": "每个所选失败组最多3笔最早实际失败交易，最多60条；not_collected 表示没有 revert/trace 证据",
     }
     tables = table(["文件", "用途与分母"], [[f"[{name}.csv]({name}.csv)", descriptions[name]] for name in TABLE_FIELDS])
     return f"""# 技术附录与复算口径

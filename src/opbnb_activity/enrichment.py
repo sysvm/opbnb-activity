@@ -361,6 +361,12 @@ def augment_result(connection, result, store, provenance, assets):
                                 ("kind", observation.get("kind", "unknown")), ("status", observation.get("status", "not_queried")),
                                 ("code_hash", observation.get("code_hash"))):
                 detail["sample_" + prefix + "_" + name] = value
+        endpoints = [detail["sample_" + prefix + "_kind"] for prefix in ("first", "last")]
+        statuses = [detail["sample_" + prefix + "_status"] for prefix in ("first", "last")]
+        detail["code_observation_scope"] = (
+            "endpoints_code_present" if statuses == ["ok", "ok"] and endpoints == ["code_present", "code_present"] else
+            "endpoints_no_code_observed" if statuses == ["ok", "ok"] and endpoints == ["no_code_observed", "no_code_observed"] else
+            "unavailable" if not any(status == "ok" for status in statuses) else "endpoints_mixed_or_incomplete")
         contract = cache.get("contracts", {}).get(address, {})
         detail.update(current_contract_name=contract.get("contract_name", ""), abi_status=contract.get("abi_status", contract.get("status", "not_queried")))
         result["recipient_details"].append(detail)

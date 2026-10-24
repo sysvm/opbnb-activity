@@ -22,7 +22,9 @@ mkdir -p logs
 nohup .venv/bin/opbnb-activity report --config config.toml --run-id mainnet-20261021 >logs/report.log 2>&1 &
 ```
 
-结果在 `config.toml` 的 `dataset/mainnet-20261021/report/`：先看中文 `summary.md`，完整定义/来源哈希见 `technical.md`，18张 CSV 已经聚合好可供 Excel 使用。长整数 wei/raw_amount 请用 Excel“数据→从文本/CSV”按**文本列**导入，避免 Excel 自动舍入；CSV 本身不改金融原值，自由文本的公式前缀已转义。输出文件地图及单日/三个月口径见 [自动分析使用说明](docs/2026-10-23-auto-analysis.md)。
+结果在 `config.toml` 的 `dataset/mainnet-20261021/report/`：先看中文 `summary.md`，完整定义/来源哈希见 `technical.md`，26张 CSV 已经聚合好可供 Excel 使用。长整数 wei/raw_amount 请用 Excel“数据→从文本/CSV”按**文本列**导入，避免 Excel 自动舍入；CSV 本身不改金融原值，自由文本的公式前缀已转义。输出文件地图及单日/三个月口径见 [自动分析使用说明](docs/2026-10-23-auto-analysis.md)。
+
+七天数据升级后的日贡献、高频发送方、失败样本及执行命令见 [离线归因使用说明](docs/2026-10-24-offline-attribution.md)。正常 `report` 不请求 RPC，不重采；新增统计需要原始 Parquet，不能只用旧报表反推。
 
 进阶可选：仅当已有兼容 `getsourcecode`（`action`、`address` 参数）元数据服务 URL 时设置 `OPBNB_CONTRACT_API_URL`，命令会限量解析当前 ABI 候选。工具没有内置无需 key 的合约 API 承诺，也不要求申请/购买新 key；未设置时记录 `unavailable_no_api` 并保留 Unknown。不要将含凭据 URL 写进报告或版本控制。合约名/ABI、symbol/decimals 不单独证明项目或 ERC20 身份。
 
@@ -47,7 +49,7 @@ python3 -m venv .venv
 - `data/YYYY-MM-DD/START-END/`：每范围一组 `blocks`、`transactions`、`receipts`、`logs` Parquet，外加 `_partition.json` SHA256/行数。例如 `data/2026-10-19/197248677-197249177/`，区块号无补零。
 - `checkpoint.sqlite`：SQLite WAL/FULL 模式的完成分片记录；分片目录原子落盘后再记 checkpoint。中间崩溃可校验并恢复已写分片。
 - `.staging/`：仅当前未完成最终分片的隐藏、已关闭且校验过的 checkpoint fragments；不是最终数据，不参加报表与质量覆盖。最终文件验证并记录 SQLite 后自动清理。
-- `quality.json`、`analysis.json`、中文 `report/summary.md`、`report/technical.md`、18张 CSV 表、`daily.png`、`projects.png`。
+- `quality.json`、`analysis.json`、中文 `report/summary.md`、`report/technical.md`、26张 CSV 表、`daily.png`、`projects.png`。
 
 目录日期取分片首区块的 UTC 日期，END 为不含的结束区块。仅新写入的分片使用简洁路径；已有 `data/date=YYYY-MM-DD/blocks=START-END/` 目录保持原位置，继续支持读取、恢复和校验，同一 run 可混用两种布局；损坏的已有分片在原路径重写。无需迁移，也没有迁移命令。
 

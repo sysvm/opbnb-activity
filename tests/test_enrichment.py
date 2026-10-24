@@ -11,6 +11,8 @@ from conftest import address, module
 
 OPTIMAI = "0xa596e82b0e7d9f5c3e7841cf3f53f66b34d2c1d2"
 USDT = "0x9e5aac1ba1a2e6aed6b32689dfcf62a509ca96f3"
+BEATSWAP = "0xdeb3fc49eb63765cdabcd0917ae4d90b75847001"
+CORTIS = "0xf77c3f4c0b835b93d8d47d52f3a44f7fe8d2269b"
 
 
 @pytest.fixture(autouse=True)
@@ -43,11 +45,43 @@ def test_registry_known_addresses_provenance_assets_and_synthetic_isolation():
     assert index.lookup("0xb89a6778d1efe7a5b7096757a21b810cc2886fa1", 100)["project"] == "PancakeSwap"
     assert {row["symbol"] for row in assets.values()} == {"BTCB", "ETH", "FDUSD", "USDT", "XCAD"}
     assert assets[USDT]["verified"] is True
-    assert all(row["source_sha256"] and row["acquired_date"] == "2026-10-23" for row in labels)
+    assert all(row["source_sha256"] and row["acquired_date"] == (
+        "2026-10-24" if row["address"] in {BEATSWAP, CORTIS} else "2026-10-23") for row in labels)
     assert "historical" in provenance["registry_temporal_scope"]
     assert registry.prepare_inputs(SimpleNamespace(manifest={"chain_id": 204, "synthetic": True}), [], {})[:2] == ([], {})
     with pytest.raises(ValueError, match="chain"):
         registry.prepare_inputs(SimpleNamespace(manifest={"chain_id": 56, "synthetic": False}), [], {})
+
+
+@pytest.mark.parametrize("recipient,project,category,role,repository,commit,source_hash", [
+    (BEATSWAP, "BeatSwap", "IP licensing/rewards", "licensing_index", "beatswap-labs/licensing-to-earn",
+     "dc6ecb64a97c5aedd1c39b3f4671eb1b351cd2c8", "e1e93f219135ab4949ee9c378fd708659af780852ed16abf4bb750e1263aa05f"),
+    (CORTIS, "Cortis AI", "AI/engagement", "engagement_core", "CortisAI/cortis-contracts",
+     "d8350f38d5d03cc845b83eb502c8e5c7619d3399", "37bfc9e7faf2dd3ec5be16c9e5ae2732bc9cb742bba4675f6e69fb3355a6ec9b"),
+])
+def test_registry_current_published_associations(recipient, project, category, role, repository, commit, source_hash):
+    registry = module("registry")
+    labels, assets, _ = registry.prepare_inputs(SimpleNamespace(manifest={"chain_id": 204, "synthetic": False}), [], {})
+    row = module("labels").LabelIndex(labels).lookup(recipient, 100)
+    assert row["project"] == project
+    assert (row["category"], row["role"]) == (category, role)
+    assert row["chain_id"] == 204
+    assert row["confidence"] == "project_published"
+    assert row["acquired_date"] == "2026-10-24"
+    assert row["source_url"] == f"https://github.com/{repository}"
+    assert row["source_snapshot_url"] == f"https://raw.githubusercontent.com/{repository}/{commit}/README.md"
+    assert row["source_sha256"] == source_hash
+    assert row["source_hash_scope"] == "SHA-256 of complete raw README.md response bytes; no normalization"
+    assert row["valid_from"] == 0
+    assert "no independent historical ownership proof" in row["temporal_scope"]
+    assert recipient not in assets
+    assert all(asset["symbol"] != "IPL" for asset in assets.values())
+    synthetic_labels, _, _ = registry.prepare_inputs(SimpleNamespace(manifest={"chain_id": 204, "synthetic": True}), [], {})
+    assert module("labels").LabelIndex(synthetic_labels).lookup(recipient, 100)["project"] == "Unknown"
+    override = dict(address=recipient, project="User label", category="user", role="user", valid_from=100, valid_to=110)
+    overridden, _, _ = registry.prepare_inputs(SimpleNamespace(manifest={"chain_id": 204, "synthetic": False}), [override], {})
+    index = module("labels").LabelIndex(overridden)
+    assert [index.lookup(recipient, number)["project"] for number in (99, 100, 109, 110)] == [project, "User label", "User label", project]
 
 
 def test_registry_explicit_intervals_split_fallback_and_reject_overlap():

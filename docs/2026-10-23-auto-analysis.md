@@ -23,12 +23,15 @@
 | retention.csv | 窗口内首次成功活动 cohort 的成熟 D1/D7；没有成熟行是 N/A，不是流失率100% |
 | transaction_types.csv / methods.csv | 互斥技术行为；接收地址/selector Top100 与候选签名及来源；方法份额分母为全部非系统交易 |
 | events.csv | 成功非系统交易中 emitter/topic0 Top100 日志、组内交易去重、签名候选；份额分母为合格日志条数，不能和交易份额混用 |
+| daily_projects.csv / daily_recipients.csv / daily_changes.csv | 全项目×日、全窗口固定接收 Top20+Other+创建×日、两套独立交易环比贡献；零活动补行，DAU 不可加 |
+| sender_profiles.csv / sender_daily.csv / sender_overlap.csv | 全窗口 Top20 sender 的完整聚合、逐日行为、两两接收对象交并比；不认定机器人或同一主体 |
+| failure_methods.csv / failure_samples.csv | 失败 recipient×selector Top20 与每组最多三笔最早失败样本；没有采集 revert 原因或 trace |
 | hourly.csv / sender_breakdown.csv | 有活动小时的 UTC/本地分布；Top20 发送方的目标/selector/小时分布，各维度最多20项 |
 | fee_groups.csv | 系统、用户deposit、常规非系统分别列 L1/L2/完整费用覆盖及精确小计；包含失败交易费用 |
 | recipient_concentration.csv / sender_concentration.csv | Top1/5/10/20，以全部非系统交易（含失败）为分母；创建交易不在接收地址排名但仍留在分母 |
 | token_metadata.csv / unresolved.csv | Top100 Transfer emitter 的可信程度、精度、符号与金额；Top100 接收地址内按影响排序的未知归属、原因和查询状态 |
 
-所有18张 CSV 空表仍有表头，使用 UTF-8 BOM 方便 Excel。自由文本以 `= + - @` 或危险控制符开头时会加单引号以避免当作公式；金额、计数和原始 wei 不加单引号、不转浮点。Excel导入长整数时必须把 wei/raw_amount/scaled_amount、地址列设为文本，否则 Excel 自己可能只保留15位有效数字。
+所有26张 CSV 空表仍有表头，使用 UTF-8 BOM 方便 Excel。自由文本以 `= + - @` 或危险控制符开头时会加单引号以避免当作公式；金额、计数和原始 wei 不加单引号、不转浮点。Excel导入长整数时必须把 wei/raw_amount/scaled_amount、地址列设为文本，否则 Excel 自己可能只保留15位有效数字。
 
 ## 结论的可信范围
 

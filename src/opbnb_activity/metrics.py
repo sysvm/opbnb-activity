@@ -5,6 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .activity_metrics import augment
+from .attribution import augment_attribution
 from .decode import decimal_units, decode_transfer
 from .enrichment import augment_result
 from .labels import LabelIndex
@@ -141,6 +142,7 @@ def analyze(store, labels, assets, save=True):
                               "labels_version": index.version, "assets_version": hashlib.sha256(json.dumps(assets, sort_keys=True).encode()).hexdigest(),
                               "dataset": ".", "identity": store.config.identity}
         augment(connection, result, store)
+        augment_attribution(connection, result)
         augment_result(connection, result, store, dict(provenance, labels=labels), assets)
         if save:
             atomic_json(store.root / "analysis.json", result)
