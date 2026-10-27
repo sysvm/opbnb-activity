@@ -2,6 +2,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .decode import decimal_units
+from .analysis_stages import materialize, run_query
 
 
 COUNTS = """count(*) AS transactions,
@@ -11,8 +12,8 @@ COUNTS = """count(*) AS transactions,
     count(*) FILTER (WHERE status=0 AND NOT is_system) AS failed_non_system_transactions"""
 
 
-def rows(connection, query):
-    cursor = connection.execute(query)
+def rows(connection, query, stage="augmentation.query"):
+    cursor = run_query(connection, stage, query)
     names = [column[0] for column in cursor.description]
     while batch := cursor.fetchmany(4096):
         for values in batch:
@@ -31,7 +32,8 @@ def fee_groups(connection):
     for group in groups.values():
         for component in ("l1", "l2", "total"):
             group[f"known_{component}_fee_transactions"] = 0
-    for row in rows(connection, "SELECT is_system,type,l1_fee_wei,l2_fee_wei,total_fee_wei FROM activity"):
+    for row in rows(connection, "SELECT is_system,type,l1_fee_wei,l2_fee_wei,total_fee_wei FROM activity",
+                    "augmentation.fee_groups"):
         name = "system" if row["is_system"] else "user_deposit" if row["type"] == 126 else "regular"
         group = groups[name]
         group["transactions"] += 1
@@ -53,31 +55,36 @@ def fee_groups(connection):
 def concentration(connection, dimension, total):
     counts = [row["transactions"] for row in rows(connection, f"""SELECT count(*) AS transactions
         FROM activity WHERE NOT is_system AND {dimension} IS NOT NULL GROUP BY {dimension}
-        ORDER BY transactions DESC, {dimension} LIMIT 20""")]
+        ORDER BY transactions DESC, {dimension} LIMIT 20""", f"augmentation.{dimension}_concentration")]
     return [{"top_n": top, "transactions": sum(counts[:top]),
              "share": sum(counts[:top]) / total if total else None} for top in (1, 5, 10, 20)]
 
 
 def sender_breakdown(connection):
-    breakdown = list(rows(connection, """WITH top_senders AS (
-        SELECT sender,count(*) AS total_transactions FROM metric_activity WHERE NOT is_system
-        GROUP BY sender ORDER BY total_transactions DESC,sender LIMIT 20), sender_activity AS (
-        SELECT metric_activity.* FROM metric_activity JOIN top_senders USING (sender)
-        WHERE NOT is_system), dimensions AS (
+    materialize(connection, "metric_top_senders", """SELECT sender,count(*) AS total_transactions
+        FROM metric_activity WHERE NOT is_system
+        GROUP BY sender ORDER BY total_transactions DESC,sender LIMIT 20""")
+    materialize(connection, "metric_sender_activity", """
+        SELECT sender,recipient,method_selector,hour_epoch FROM metric_activity JOIN metric_top_senders USING (sender)
+        WHERE NOT is_system""")
+    materialize(connection, "metric_sender_recipients", """
         SELECT sender,'recipient' AS dimension,recipient AS key,count(*) AS transactions
-        FROM sender_activity GROUP BY sender,recipient
-        UNION ALL
-        SELECT sender,'selector',method_selector,count(*) FROM sender_activity
-        GROUP BY sender,method_selector
-        UNION ALL
-        SELECT sender,'hour',cast(hour_epoch AS VARCHAR),count(*) FROM sender_activity
-        GROUP BY sender,hour_epoch), ranked AS (
-        SELECT dimensions.*,top_senders.total_transactions,
+        FROM metric_sender_activity GROUP BY sender,recipient""")
+    materialize(connection, "metric_sender_methods", """
+        SELECT sender,'selector' AS dimension,method_selector AS key,count(*) AS transactions
+        FROM metric_sender_activity GROUP BY sender,method_selector""")
+    materialize(connection, "metric_sender_hours", """
+        SELECT sender,'hour' AS dimension,cast(hour_epoch AS VARCHAR) AS key,count(*) AS transactions
+        FROM metric_sender_activity GROUP BY sender,hour_epoch""")
+    breakdown = list(rows(connection, """WITH dimensions AS (
+        SELECT * FROM metric_sender_recipients UNION ALL SELECT * FROM metric_sender_methods
+        UNION ALL SELECT * FROM metric_sender_hours), ranked AS (
+        SELECT dimensions.*,metric_top_senders.total_transactions,
         row_number() OVER (PARTITION BY dimensions.sender,dimension ORDER BY transactions DESC,key NULLS LAST) AS rank
-        FROM dimensions JOIN top_senders USING (sender))
+        FROM dimensions JOIN metric_top_senders USING (sender))
         SELECT sender,dimension,key,transactions,total_transactions,
         transactions::DOUBLE / total_transactions AS share FROM ranked WHERE rank<=20
-        ORDER BY sender,dimension,rank"""))
+        ORDER BY sender,dimension,rank""", "augmentation.sender_breakdown"))
     for row in breakdown:
         if row["dimension"] == "hour":
             row["key"] = datetime.fromtimestamp(int(row["key"]), timezone.utc).isoformat()
@@ -120,31 +127,43 @@ def augment(connection, result, store):
              WHEN length(input)>=10 AND regexp_full_match(input,'0x([a-fA-F0-9]{2})*')
              THEN lower(substr(input,1,10)) ELSE NULL END AS method_selector,
         floor(timestamp/3600)::BIGINT*3600 AS hour_epoch FROM activity""")
-    daily = {row["day"]: row for row in rows(connection, f"SELECT day,{COUNTS} FROM activity GROUP BY day")}
+    daily = {row["day"]: row for row in rows(connection, f"SELECT day,{COUNTS} FROM activity GROUP BY day",
+                                             "augmentation.daily_counts")}
     empty = {"non_system_transactions": 0, "successful_non_system_transactions": 0, "failed_non_system_transactions": 0}
     for row in result["daily"]:
         row.update(daily.get(row["day"], empty))
         rates(row)
     summary = result["summary"]
-    summary.update(next(rows(connection, f"SELECT {COUNTS} FROM activity")))
+    summary.update(next(rows(connection, f"SELECT {COUNTS} FROM activity", "augmentation.summary_counts")))
     rates(summary)
     total = summary["transactions"]
     non_system = summary["non_system_transactions"]
     result["transaction_types"] = list(rows(connection, """SELECT transaction_type,count(*) AS transactions
-        FROM metric_activity GROUP BY transaction_type ORDER BY transactions DESC,transaction_type"""))
+        FROM metric_activity GROUP BY transaction_type ORDER BY transactions DESC,transaction_type""",
+        "augmentation.transaction_types"))
     for row in result["transaction_types"]:
         row.update(total_transactions=total, share=row["transactions"] / total if total else None)
     result["methods"] = list(rows(connection, """SELECT recipient,method_selector AS selector,count(*) AS transactions,
         count(*) FILTER (WHERE status=1) AS successful_transactions,
         count(*) FILTER (WHERE status=0) AS failed_transactions
         FROM metric_activity WHERE NOT is_system GROUP BY recipient,method_selector
-        ORDER BY transactions DESC,recipient NULLS LAST,selector NULLS LAST LIMIT 100"""))
+        ORDER BY transactions DESC,recipient NULLS LAST,selector NULLS LAST LIMIT 100""", "augmentation.methods"))
     for row in result["methods"]:
         row.update(total_transactions=non_system, share=row["transactions"] / non_system if non_system else None)
-    result["hourly"] = list(rows(connection, f"""SELECT hour_epoch,{COUNTS},
-        count(DISTINCT sender) FILTER (WHERE status=1 AND NOT is_system) AS active_senders,
-        count(DISTINCT sender) FILTER (WHERE NOT is_system) AS all_non_system_senders
-        FROM metric_activity GROUP BY hour_epoch ORDER BY hour_epoch"""))
+    materialize(connection, "metric_hour_senders", """SELECT hour_epoch,sender,
+        max(CASE WHEN status=1 THEN 1 ELSE 0 END) AS successful
+        FROM metric_activity WHERE NOT is_system AND sender IS NOT NULL
+        GROUP BY hour_epoch,sender""")
+    materialize(connection, "metric_hour_users", """SELECT hour_epoch,
+        count(*) FILTER (WHERE successful=1) AS active_senders,
+        count(*) AS all_non_system_senders FROM metric_hour_senders GROUP BY hour_epoch""")
+    materialize(connection, "metric_hour_counts", f"""SELECT hour_epoch,{COUNTS}
+        FROM metric_activity GROUP BY hour_epoch""")
+    result["hourly"] = list(rows(connection, """SELECT counts.*,
+        coalesce(users.active_senders,0) AS active_senders,
+        coalesce(users.all_non_system_senders,0) AS all_non_system_senders
+        FROM metric_hour_counts counts LEFT JOIN metric_hour_users users USING (hour_epoch)
+        ORDER BY hour_epoch""", "augmentation.hourly"))
     zone = ZoneInfo(store.config.timezone)
     for row in result["hourly"]:
         hour = datetime.fromtimestamp(row.pop("hour_epoch"), timezone.utc)

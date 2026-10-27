@@ -196,7 +196,7 @@ selector 签名候选及来源见 [methods.csv](methods.csv)；emitter/topic0 �
 
 def technical_appendix(result, store):
     metadata, summary = result["metadata"], result["summary"]
-    keys = ("run_id", "synthetic", "timezone", "start_utc", "end_utc", "identity", "dataset_version", "labels_version",
+    keys = ("run_id", "synthetic", "timezone", "start_utc", "end_utc", "identity", "analysis_engine", "dataset_version", "labels_version",
             "assets_version", "registry_status", "registry_hash", "registry_temporal_scope", "enrichment_status",
             "enrichment_schema", "enrichment_hash")
     versions = table(["字段", "值"], [[key, cell(metadata.get(key))] for key in keys])
@@ -236,7 +236,7 @@ def technical_appendix(result, store):
     tables = table(["文件", "用途与分母"], [[f"[{name}.csv]({name}.csv)", descriptions[name]] for name in TABLE_FIELDS])
     return f"""# 技术附录与复算口径
 
-本报告在原始 Parquet 上离线复算；数据根目录是报告的上一级（相对路径 `..`）。不需要 SQL 或数据库人工操作。
+本报告校验原始 Parquet 后，以按物理分区关联生成的临时磁盘表离线复算；中间结果结束后清理。数据根目录是报告的上一级（相对路径 `..`）。不需要 SQL 或数据库人工操作。
 声明区块范围 [{store.start_block}, {store.end_block})，UTC 时间范围 [{cell(metadata['start_utc'])}, {cell(metadata['end_utc'])})；结束不含，按 {cell(metadata['timezone'])} 分日。
 quality 校验已通过：范围、分区哈希、区块连续性/父哈希、交易数、receipt对应、日志关联和重复检查；不能独立证明节点返回的 canonical chain。
 

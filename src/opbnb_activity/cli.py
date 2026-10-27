@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .collect import collect
+from .analysis_stages import AnalysisStageError
 from .config import load
 from .enrichment import ContractMetadataClient, enrich
 from .labels import load_labels
@@ -205,7 +206,7 @@ def main(argv=None):
         finally:
             client.close()
     except (ValueError, OSError, RpcError, KeyError) as error:
-        message = str(error) if isinstance(error, RpcError) else type(error).__name__
+        message = str(error) if isinstance(error, (RpcError, AnalysisStageError)) else type(error).__name__
         if isinstance(error, ValueError) and str(error) in SAFE_VALUE_ERRORS:
             message = str(error)
         logger.error("Error: %s", message)

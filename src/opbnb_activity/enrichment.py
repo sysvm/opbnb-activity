@@ -15,6 +15,7 @@ from .labels import LabelIndex
 from .quality import validate
 from .rpc import RpcClient, RpcError
 from .storage import atomic_json, digest
+from .analysis_stages import materialize, run_query
 
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 1
@@ -36,18 +37,28 @@ def rows(cursor):
 
 
 def targets(connection, top):
-    recipients = rows(connection.execute("""SELECT recipient AS address, count(*) AS transactions,
+    staged = connection.execute("SELECT count(*) FROM information_schema.tables WHERE table_name='eligible_logs'").fetchall()[0][0] > 0
+    activity_source = 'activity' if staged else 'transactions'
+    recipients = rows(run_query(connection, 'enrichment_recipients', f"""SELECT recipient AS address, count(*) AS transactions,
         min(block_number) AS first_block, max(block_number) AS last_block,
         arg_min(block_hash, block_number) AS first_hash, arg_max(block_hash, block_number) AS last_hash
-        FROM transactions WHERE NOT is_system AND recipient IS NOT NULL
+        FROM {activity_source} WHERE NOT is_system AND recipient IS NOT NULL
         GROUP BY recipient ORDER BY transactions DESC, recipient LIMIT ?""", [top]))
-    tokens = rows(connection.execute("""SELECT logs.address, count(*) AS log_count,
+    if staged:
+        materialize(connection, 'report_transfer_keys', """SELECT address,transaction_hash,count(*) AS log_count,
+            max(block_number) AS last_block,arg_max(block_hash,block_number) AS last_hash
+            FROM eligible_logs WHERE lower(topics[1])=? GROUP BY address,transaction_hash""", [TRANSFER_TOPIC])
+        tokens = rows(run_query(connection, 'enrichment_transfer_targets', """SELECT address,sum(log_count)::BIGINT AS log_count,
+            count(*) AS transactions,max(last_block) AS last_block,arg_max(last_hash,last_block) AS last_hash
+            FROM report_transfer_keys GROUP BY address ORDER BY log_count DESC,address LIMIT ?""", [top]))
+    else:
+        tokens = rows(connection.execute("""SELECT logs.address, count(*) AS log_count,
         count(DISTINCT logs.transaction_hash) AS transactions, max(logs.block_number) AS last_block,
         arg_max(logs.block_hash,logs.block_number) AS last_hash
         FROM logs JOIN transactions ON logs.transaction_hash=transactions.hash
         JOIN receipts ON logs.transaction_hash=receipts.transaction_hash
         WHERE NOT transactions.is_system AND receipts.status=1 AND lower(logs.topics[1])=?
-        GROUP BY logs.address ORDER BY log_count DESC, logs.address LIMIT ?""", [TRANSFER_TOPIC, top]))
+            GROUP BY logs.address ORDER BY log_count DESC, logs.address LIMIT ?""", [TRANSFER_TOPIC, top]))
     for row in recipients + tokens:
         if not HEX_ADDRESS.fullmatch(row["address"]):
             raise ValueError("invalid enrichment target")
@@ -329,6 +340,9 @@ def signature_candidate(cache, address, key, dimension):
 
 
 def augment_result(connection, result, store, provenance, assets):
+    if not connection.execute("SELECT count(*) FROM information_schema.tables WHERE table_name='eligible_logs'").fetchall()[0][0]:
+        materialize(connection, 'eligible_logs', """SELECT logs.* FROM logs JOIN activity
+            ON logs.transaction_hash=activity.hash WHERE activity.status=1 AND NOT activity.is_system""")
     cache, status = load_cache(store)
     cache = cache or {}
     result["metadata"].update(provenance, enrichment_status=status, enrichment_schema=SCHEMA_VERSION,
@@ -391,12 +405,12 @@ def augment_result(connection, result, store, provenance, assets):
             scaled_amount=result["summary"]["verified_token_amounts"].get(address) if trusted else None))
     for row in result["methods"]:
         row["signature_candidates"], row["signature_evidence"] = signature_candidate(cache, row["recipient"], row["selector"], "functions")
-    denominator = connection.execute("""SELECT count(*) FROM logs JOIN activity ON logs.transaction_hash=activity.hash
-        WHERE activity.status=1 AND NOT activity.is_system""").fetchone()[0]
-    result["events"] = rows(connection.execute("""SELECT logs.address, lower(logs.topics[1]) AS topic0,
-        count(*) AS log_count, count(DISTINCT logs.transaction_hash) AS transactions
-        FROM logs JOIN activity ON logs.transaction_hash=activity.hash WHERE activity.status=1 AND NOT activity.is_system
-        GROUP BY logs.address,lower(logs.topics[1]) ORDER BY log_count DESC,logs.address,topic0 NULLS LAST LIMIT 100"""))
+    denominator = connection.execute('SELECT count(*) FROM eligible_logs').fetchall()[0][0]
+    materialize(connection, 'report_event_keys', """SELECT address,lower(topics[1]) AS topic0,transaction_hash,count(*) AS log_count
+        FROM eligible_logs GROUP BY address,lower(topics[1]),transaction_hash""")
+    result["events"] = rows(run_query(connection, 'enrichment_events', """SELECT address,topic0,sum(log_count)::BIGINT AS log_count,
+        count(*) AS transactions FROM report_event_keys GROUP BY address,topic0
+        ORDER BY log_count DESC,address,topic0 NULLS LAST LIMIT 100"""))
     for row in result["events"]:
         row.update(eligible_log_count=denominator, share=row["log_count"] / denominator if denominator else None)
         row["signature_candidates"], row["signature_evidence"] = signature_candidate(cache, row["address"], row["topic0"], "events")

@@ -263,15 +263,16 @@ class Store:
     def read_table(self, name):
         return [row for _, tables in self.iter_partitions() for row in tables[name]]
 
-    def connection(self):
+    def connection(self, *, database=None):
         import duckdb
         import pyarrow as arrow
-        connection = duckdb.connect()
+        connection = duckdb.connect() if database is None else duckdb.connect(database=str(database))
         try:
             connection.execute("SET memory_limit=?", [f"{self.config.analysis_memory_limit_mb}MB"])
             connection.execute("SET threads=?", [self.config.analysis_threads])
             connection.execute("SET preserve_insertion_order=false")
-            parent = Path(self.config.analysis_temp_directory).expanduser().resolve() if self.config.analysis_temp_directory else self.root / ".duckdb-tmp"
+            parent = (Path(database).resolve().parent / '.spill' if database is not None else
+                Path(self.config.analysis_temp_directory).expanduser().resolve() if self.config.analysis_temp_directory else self.root / ".duckdb-tmp")
             temporary = parent / ("session-" + uuid.uuid4().hex)
             temporary.mkdir(parents=True)
             connection.execute("SET temp_directory=?", [str(temporary)])
