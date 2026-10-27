@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .checkpoint import Checkpoint
-from .config import Config
+from .config import ANALYSIS_SETTINGS, Config
 from .models import TABLES
 
 FIELDS = {
@@ -76,10 +76,12 @@ class Store:
         self.checkpoint = Checkpoint(self.root / "checkpoint.sqlite", config.identity)
 
     @classmethod
-    def open(cls, dataset, run_id):
+    def open(cls, dataset, run_id, *, analysis_settings=None):
         root = Path(dataset).expanduser().resolve() / run_id
         manifest = json.loads((root / "manifest.json").read_text())
         settings = dict(manifest["config"], dataset=dataset, run_id=run_id)
+        if analysis_settings is not None:
+            settings.update({key: getattr(analysis_settings, key) for key in ANALYSIS_SETTINGS})
         return cls(Config(**settings), manifest["start_block"], manifest["end_block"], manifest["synthetic"])
 
     def ranges(self):
@@ -265,15 +267,24 @@ class Store:
         import duckdb
         import pyarrow as arrow
         connection = duckdb.connect()
-        connection.execute("SET memory_limit='512MB'")
-        connection.execute("SET threads=2")
-        temporary = self.root / ".duckdb-tmp"
-        temporary.mkdir(exist_ok=True)
-        connection.execute("SET temp_directory=?", [str(temporary)])
-        for name in TABLES:
-            paths = [str(path / (name + ".parquet")) for path in self.partition_dirs()]
-            if paths:
-                connection.from_parquet(paths, hive_partitioning=False).create_view(name)
-            else:
-                connection.register(name, arrow.Table.from_pylist([], schema=schema(name)))
-        return connection
+        try:
+            connection.execute("SET memory_limit=?", [f"{self.config.analysis_memory_limit_mb}MB"])
+            connection.execute("SET threads=?", [self.config.analysis_threads])
+            connection.execute("SET preserve_insertion_order=false")
+            parent = Path(self.config.analysis_temp_directory).expanduser().resolve() if self.config.analysis_temp_directory else self.root / ".duckdb-tmp"
+            temporary = parent / ("session-" + uuid.uuid4().hex)
+            temporary.mkdir(parents=True)
+            connection.execute("SET temp_directory=?", [str(temporary)])
+            logging.getLogger(__name__).info("Analysis resources: memory_limit_mb=%d threads=%d custom_spill=%s",
+                self.config.analysis_memory_limit_mb, self.config.analysis_threads, bool(self.config.analysis_temp_directory))
+            paths = self.partition_dirs()
+            for name in TABLES:
+                filenames = [str(path / (name + ".parquet")) for path in paths]
+                if filenames:
+                    connection.from_parquet(filenames, hive_partitioning=False).create_view(name)
+                else:
+                    connection.register(name, arrow.Table.from_pylist([], schema=schema(name)))
+            return connection
+        except Exception:
+            connection.close()
+            raise

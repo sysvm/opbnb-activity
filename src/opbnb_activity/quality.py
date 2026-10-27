@@ -1,4 +1,5 @@
 import json
+import logging
 
 from .models import TABLES
 from .quality_sql import relational_errors
@@ -12,6 +13,7 @@ OPTIONAL_FIELDS = {
     "logs": set(),
 }
 RANGE_ERROR = "manifest block range incomplete or unexpected partitions"
+logger = logging.getLogger(__name__)
 
 
 def _inspect_blocks(batch, previous_number, previous_hash, start, end, timestamps, errors):
@@ -79,30 +81,53 @@ def validate(store, save=True):
     previous = store.start_block - 1, None
     timestamps = int(store.config.start_utc.timestamp()), int(store.config.end_utc.timestamp())
     paths = []
+    stage = "partition recovery"
+    failure_stage = None
+
+    def set_stage(value):
+        nonlocal stage
+        stage = value
+
     try:
-        for start, end in expected_ranges.items():
+        logger.info("Partition recovery/checksum preflight start: partitions=%d", len(expected_ranges))
+        for position, (start, end) in enumerate(expected_ranges.items(), 1):
+            stage = f"partition recovery/checksum preflight {position}"
             if not store.completed(start) and not store.recover(start):
                 errors.add(f"missing/corrupt/incomplete partition [{start},{end})")
+            if position % 25 == 0:
+                logger.info("Partition recovery/checksum preflight progress: partitions=%d/%d",
+                            position, len(expected_ranges))
+        logger.info("Partition recovery/checksum preflight complete: partitions=%d", len(expected_ranges))
+        stage = "partition discovery"
         paths = store.partition_dirs()
-        for path in paths:
+        for position, path in enumerate(paths, 1):
+            stage = f"typed partition inspection {position}"
             start, end = [int(bound) for bound in path.name.removeprefix("blocks=").split("-")]
             if start in seen_starts or expected_ranges.get(start) != end:
                 errors.add("unexpected partition " + path.name)
                 errors.add(RANGE_ERROR)
             seen_starts.add(start)
             previous = _inspect_partition(path, start, end, store, counts, previous, timestamps, errors)
+            if position % 25 == 0:
+                logger.info("Typed partition inspection progress: partitions=%d/%d", position, len(paths))
+        logger.info("Typed partition inspection complete: partitions=%d", len(paths))
         if paths and not any(error.startswith("typed schema mismatch") for error in errors):
+            stage = "quality connection setup"
             connection = store.connection()
             try:
-                errors.update(relational_errors(connection, paths))
+                errors.update(relational_errors(connection, paths, set_stage=set_stage))
             finally:
                 connection.close()
     except Exception as error:
         errors.add("cannot read typed partitions: " + type(error).__name__)
+        failure_stage = stage
+        logger.error("Quality validation failed: stage=%s error_type=%s", stage, type(error).__name__)
     if seen_starts != set(expected_ranges) or counts["blocks"] != store.end_block - store.start_block:
         errors.add(RANGE_ERROR)
     result = {"ok": not errors, "errors": sorted(errors), "counts": counts,
               "identity": store.config.identity, "start_block": store.start_block, "end_block": store.end_block}
+    if failure_stage is not None:
+        result["failure_stage"] = failure_stage
     if save:
         atomic_json(store.root / "quality.json", result)
     return result

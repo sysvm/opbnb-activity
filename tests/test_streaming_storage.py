@@ -37,7 +37,8 @@ def test_config_strict_bounds(setting, values, message):
 def test_large_config_preserves_identity_formula():
     config = module("config").Config(run_id="large", blocks_per_partition=100000, blocks_per_checkpoint=500)
     settings = asdict(config)
-    for key in ("dataset", "run_id", "qps", "concurrency", "batch_size", "timeout_seconds", "retries", "labels", "assets", "blocks_per_checkpoint"):
+    for key in ("dataset", "run_id", "qps", "concurrency", "batch_size", "timeout_seconds", "retries", "labels", "assets", "blocks_per_checkpoint",
+                "analysis_memory_limit_mb", "analysis_threads", "analysis_temp_directory"):
         settings.pop(key)
     settings.update(schema_version=1, chain_id=204)
     assert config.identity == hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()

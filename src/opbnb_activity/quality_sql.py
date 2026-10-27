@@ -1,4 +1,9 @@
+import logging
+
 from .models import TABLES
+
+logger = logging.getLogger(__name__)
+HASH_BATCH_SIZE = 4096
 
 CHECKS = (
     ("duplicate transaction/receipt hash", """
@@ -48,19 +53,54 @@ CHECKS = (
 )
 
 
-def relational_errors(connection, paths):
-    for name in TABLES:
-        filenames = [str(path / (name + ".parquet")) for path in paths]
-        connection.from_parquet(filenames, filename=True, hive_partitioning=False).project(
-            "*, regexp_replace(filename, '/[^/]+$', '') AS partition_path"
-        ).create_view("quality_" + name)
-    errors = []
-    for message, query in CHECKS:
-        if connection.execute("SELECT EXISTS (" + query + ")").fetchone()[0]:
-            errors.append(message)
+def _has_duplicate_hash(connection, table, key, paths):
+    filenames = [str(path / (table + ".parquet")) for path in paths]
+    connection.from_parquet(filenames, hive_partitioning=False).project(f'"{key}"').create_view(
+        "quality_hashes", replace=True
+    )
+    cursor = connection.execute(f'SELECT "{key}" FROM quality_hashes ORDER BY "{key}"')
+    previous = object()
+    duplicate = False
+    while True:
+        batch = cursor.fetchmany(HASH_BATCH_SIZE)
+        if not batch:
+            return duplicate
+        for (value,) in batch:
+            if value == previous:
+                duplicate = True
+            previous = value
+
+
+def relational_errors(connection, paths, set_stage=None):
+    errors = set()
+    for position, path in enumerate(paths, 1):
+        if set_stage is not None:
+            set_stage(f"relational partition {position} views")
+        for name in TABLES:
+            connection.from_parquet([str(path / (name + ".parquet"))], filename=True,
+                                    hive_partitioning=False).project(
+                "*, regexp_replace(filename, '/[^/]+$', '') AS partition_path"
+            ).create_view("quality_" + name, replace=True)
+        for check_number, (message, query) in enumerate(CHECKS, 1):
+            if set_stage is not None:
+                set_stage(f"relational partition {position} check {check_number}")
+            if position == 1 or position % 25 == 0:
+                logger.info("Relational check start: partition=%d/%d check=%s", position, len(paths), message)
+            cursor = connection.execute("SELECT EXISTS (" + query + ")")
+            exists = cursor.fetchone()[0]
+            cursor.fetchone()
+            if exists:
+                errors.add(message)
+        if position % 25 == 0:
+            logger.info("Relational partition checks progress: partitions=%d/%d", position, len(paths))
+    logger.info("Relational partition checks complete: partitions=%d", len(paths))
+    if not paths:
+        return []
     for table, key in (("blocks", "hash"), ("transactions", "hash"), ("receipts", "transaction_hash")):
-        if connection.execute(
-            f'SELECT EXISTS (SELECT "{key}" FROM quality_{table} GROUP BY "{key}" HAVING COUNT(*) > 1)'
-        ).fetchone()[0]:
-            errors.append("cross-partition duplicate " + table)
-    return errors
+        if set_stage is not None:
+            set_stage("global duplicate sort " + table)
+        logger.info("Global duplicate sort start: table=%s", table)
+        if _has_duplicate_hash(connection, table, key, paths):
+            errors.add("cross-partition duplicate " + table)
+        logger.info("Global duplicate sort complete: table=%s", table)
+    return sorted(errors)

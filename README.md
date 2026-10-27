@@ -4,6 +4,8 @@
 
 ## 简单升级后重新报告（已有采集数据）
 
+大规模报告若遇到 `OutOfMemoryException`，升级后可配置 `analysis_memory_limit_mb = 8192`、`analysis_threads = 2`；适用于16GB服务器的起始预算，不是整个Python进程的硬上限。校验现改为按物理分区关联、全量hash排序流式查重，不跳过任何检查；需要足够临时磁盘空间。现有run无需重采或改manifest，操作及故障阶段说明见 [分析内存修复](docs/2026-10-27-analysis-memory.md)。
+
 把新版源码同步到服务器原项目目录，在原虚拟环境安装更新；新增 `pycryptodome` 依赖，使用正常依赖安装，不要加 `--no-deps`。原来的 `config.toml`、数据目录、run ID 和已设置的 `OPBNB_RPC_URL` 保留；**无需重复 collect、rescan 或先手动 analyze，report 内部自动分析**。等待该 run 原采集完成后，在原项目目录执行：
 
 ```bash

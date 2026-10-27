@@ -83,7 +83,8 @@ def test_config_concurrency_default_and_old_identity(tmp_path):
     config = settings(tmp_path)
     assert config.concurrency == 1
     old = asdict(config)
-    for key in ("dataset", "run_id", "qps", "batch_size", "timeout_seconds", "retries", "labels", "assets", "concurrency", "blocks_per_checkpoint"):
+    for key in ("dataset", "run_id", "qps", "batch_size", "timeout_seconds", "retries", "labels", "assets", "concurrency", "blocks_per_checkpoint",
+                "analysis_memory_limit_mb", "analysis_threads", "analysis_temp_directory"):
         old.pop(key)
     old.update(schema_version=1, chain_id=204)
     expected = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()

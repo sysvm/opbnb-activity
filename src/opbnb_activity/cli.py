@@ -37,6 +37,7 @@ SAFE_VALUE_ERRORS = {
     "log receipt/hash/index mismatch",
     "Explicit safe run_id required (letters, numbers, underscore, dot, dash)",
     "Invalid bounded RPC settings",
+    "Invalid analysis resource settings",
     "blocks_per_partition must be an integer in [1,100000]",
     "blocks_per_checkpoint must be an integer in [1,5000]",
     "Asset decimals must be an integer in [0,255]",
@@ -117,7 +118,7 @@ def main(argv=None):
     try:
         if arguments.command == "enrich":
             settings = load(arguments.config, dataset=arguments.dataset, run_id=arguments.run_id)
-            store = Store.open(settings.dataset, arguments.run_id)
+            store = Store.open(settings.dataset, arguments.run_id, analysis_settings=settings if arguments.config else None)
             log_start(arguments, settings)
             if store.manifest["synthetic"]:
                 raise ValueError("synthetic enrichment refuses live network")
@@ -140,7 +141,7 @@ def main(argv=None):
                     metadata.close()
         if arguments.command in ("validate", "analyze", "report"):
             settings = load(arguments.config, dataset=arguments.dataset, run_id=arguments.run_id)
-            store = Store.open(settings.dataset, arguments.run_id)
+            store = Store.open(settings.dataset, arguments.run_id, analysis_settings=settings if arguments.config else None)
             log_start(arguments, store.config)
             if arguments.command == "validate":
                 result = validate_with_logging(store)
