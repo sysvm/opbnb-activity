@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from conftest import address, block_hash, module
 
@@ -69,3 +69,10 @@ def test_full_parquet_report_high_cardinality_with_128mb(tmp_path):
         row = next(row for row in result['daily'] if row['day'] == day)
         assert row['active_senders'] == sum(day in activity_days for activity_days in successful_days.values())
     assert sum(row['active_senders'] for row in result['daily']) > result['summary']['unique_successful_senders']
+    for period in ('weekly', 'monthly'):
+        for row in result[period]:
+            start = datetime.fromisoformat(row['period_start']).date()
+            end = start + timedelta(days=7) if period == 'weekly' else (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            expected_senders = {sender for sender, activity_days in successful_days.items()
+                if any(start <= datetime.fromisoformat(day).date() < end for day in activity_days)}
+            assert row['active_senders'] == len(expected_senders)

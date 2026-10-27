@@ -115,7 +115,7 @@ def period_tables(connection):
     result = {}
     for period in ("week", "month"):
         materialize(connection, f"report_{period}_sender_keys", f"""
-            SELECT cast(date_trunc('{period}',day::DATE) AS VARCHAR) AS period_start,
+            SELECT strftime(date_trunc('{period}',day::DATE), '%Y-%m-%d') AS period_start,
                 sender, max(successful_transactions)>0 AS successful
             FROM report_sender_day WHERE sender IS NOT NULL GROUP BY period_start, sender""")
         materialize(connection, f"report_{period}_senders", f"""
@@ -123,7 +123,7 @@ def period_tables(connection):
                 count(*) AS all_non_system_senders
             FROM report_{period}_sender_keys GROUP BY period_start""")
         materialize(connection, f"report_{period}_periods", f"""
-            SELECT cast(date_trunc('{period}',day::DATE) AS VARCHAR) AS period_start
+            SELECT strftime(date_trunc('{period}',day::DATE), '%Y-%m-%d') AS period_start
             FROM activity GROUP BY period_start""")
         result[period + "ly"] = _rows(connection, f"core_{period}", f"""
             SELECT periods.period_start, coalesce(senders.active_senders,0) AS active_senders,

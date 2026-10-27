@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .labels import LabelIndex
 from .storage import atomic_json
+from .system_transactions import tx_dag_sql
 
 logger = logging.getLogger(__name__)
 _workspace = ContextVar('analysis_workspace', default=None)
@@ -100,17 +101,24 @@ def prepare_activity(connection, store, labels):
     zone = store.config.timezone.replace("'", "''")
     paths = store.partition_dirs()
     for position, path in enumerate(paths, 1):
-        for table in ('transactions', 'receipts', 'logs'):
+        for table in ('transactions', 'receipts', 'logs', 'blocks'):
             connection.from_parquet([str(path / (table + '.parquet'))], hive_partitioning=False).create_view(
                 'stage_' + table, replace=True)
+        dag = tx_dag_sql()
+        run_query(connection, f'classify_partition_{position}', f"""
+            CREATE OR REPLACE TEMP VIEW stage_classified_transactions AS
+            SELECT t.* REPLACE ((t.is_system OR {dag}) AS is_system,
+                CASE WHEN {dag} THEN 'system_tx_dag' ELSE t.classification END AS classification)
+            FROM stage_transactions t JOIN stage_receipts r ON t.hash=r.transaction_hash
+            JOIN stage_blocks b ON t.block_number=b.number""")
         query = f"""INSERT INTO activity SELECT t.*,r.status,r.l2_fee_wei,r.l1_fee_wei,r.total_fee_wei,
             strftime(to_timestamp(t.timestamp) AT TIME ZONE '{zone}', '%Y-%m-%d') AS day,
             coalesce(labels.project,'Unknown'),coalesce(labels.category,'unknown'),coalesce(labels.role,'unknown')
-            FROM stage_transactions t JOIN stage_receipts r ON t.hash=r.transaction_hash
+            FROM stage_classified_transactions t JOIN stage_receipts r ON t.hash=r.transaction_hash
             LEFT JOIN labels ON t.recipient=labels.address AND t.block_number>=labels.valid_from AND t.block_number<labels.valid_to"""
         for name, statement in ((f'activity_partition_{position}', query), (f'logs_partition_{position}', """
             INSERT INTO eligible_logs SELECT logs.* FROM stage_logs logs
-            JOIN stage_transactions t ON logs.transaction_hash=t.hash
+            JOIN stage_classified_transactions t ON logs.transaction_hash=t.hash
             JOIN stage_receipts r ON logs.transaction_hash=r.transaction_hash WHERE NOT t.is_system AND r.status=1""")):
             cursor = run_query(connection, name, statement)
             while cursor.fetchone() is not None:
@@ -118,7 +126,9 @@ def prepare_activity(connection, store, labels):
         if position % 25 == 0 or position == len(paths):
             connection.execute('CHECKPOINT')
             logger.info('Analysis staging progress: partitions=%d/%d', position, len(paths))
-    for table in ('transactions', 'receipts', 'logs'):
+    if paths:
+        connection.execute('DROP VIEW stage_classified_transactions')
+    for table in ('transactions', 'receipts', 'logs', 'blocks'):
         if paths:
             connection.execute('DROP VIEW stage_' + table)
     connection.execute('CHECKPOINT')

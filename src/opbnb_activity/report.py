@@ -14,6 +14,7 @@ from .report_tables import TABLE_FIELDS, export_tables
 logger = logging.getLogger(__name__)
 BEHAVIORS = {
     "system_l1_attributes": "协议 L1 attributes 系统交易",
+    "system_tx_dag": "协议 TxDAG 并行执行依赖记录",
     "user_deposit": "用户 deposit（非系统；不等于完整跨链量）",
     "contract_creation": "创建交易（to 为空）",
     "empty_calldata": "空 input（不证明 EOA，也不证明普通转账）",
@@ -196,7 +197,7 @@ selector 签名候选及来源见 [methods.csv](methods.csv)；emitter/topic0 �
 
 def technical_appendix(result, store):
     metadata, summary = result["metadata"], result["summary"]
-    keys = ("run_id", "synthetic", "timezone", "start_utc", "end_utc", "identity", "analysis_engine", "dataset_version", "labels_version",
+    keys = ("run_id", "synthetic", "timezone", "start_utc", "end_utc", "identity", "analysis_engine", "system_rules_version", "dataset_version", "labels_version",
             "assets_version", "registry_status", "registry_hash", "registry_temporal_scope", "enrichment_status",
             "enrichment_schema", "enrichment_hash")
     versions = table(["字段", "值"], [[key, cell(metadata.get(key))] for key in keys])
@@ -251,7 +252,9 @@ observed_unverified 的 symbol/decimals 只是历史 eth_call 观测；只有显
 
 ## 交易、地址与周期
 
-系统判定同时要求 deposit type 126（0x7e）、配置的 L1 attributes depositor 与 recipient；普通用户 deposit 单列且属非系统，不能按 type 排除全部用户存入。系统规则可能并未穷尽链上所有协议行为。
+L1 attributes 系统判定同时要求 deposit type 126（0x7e）、配置的 depositor 与 recipient；普通用户 deposit 单列且属非系统，不能按 type 排除全部用户存入。
+TxDAG 另按已知主网发送方 0x8eece8cb98dc9aaddb37a8177e4615469d771631、接收方 0xda90000000000000000000000000000000000000、legacy type 0、零 value、成功 receipt、已观测零 effectiveGasPrice、区块最后一笔以及合法十六进制 calldata（至少 ABI 头长度、selector=0x5517ed8c）组合识别，单列 system_tx_dag；不靠地址、selector 或零费用单项排除普通调用，未完整解码其 DAG payload。其他发送方或证据不足保持原分类，不声称穷尽所有协议行为或发送方轮换。
+分析时在分区临时视图中重新识别 TxDAG，旧 Parquet 中的 is_system/classification 可能仍为采集时旧分类；原始文件、manifest、配置 identity 和 checkpoint 均不修改。system_rules_version 标识分析分类规则版本，所有非系统活跃/榜单/事件口径均应用重新识别后的分类。
 全部交易包含系统；非系统成功/失败互斥，失败率分母为全部非系统交易。主 DAU 为本地日成功非系统发送方去重；补充 all_non_system_senders 包含失败。全窗口、周、月分别做集合去重，不能对 DAU 或项目地址简单求和；智能账户、中继、批处理和自转账都不等于独立自然人。
 接收地址集中度按实际 recipient 去重（不会因标签变化重复排名），创建交易仍留在分母。已知归属 Top1/5/10 和 HHI 排除 Unknown，分母仍为全部非系统交易；无已知项目为 N/A。Top1% 成功发送方按完整集合向上取整，分母为成功非系统交易，不从截断榜单外推。
 技术分类优先顺序：系统、用户deposit、创建、空input、selector、短calldata、unknown；互斥。empty_calldata 不证明 EOA/普通转账，selector_call 不证明业务意图。方法/事件签名可来自当前已验证 ABI 候选或标准签名候选，signature_evidence 区分来源；selector/topic碰撞及历史实现变化仍可能存在。

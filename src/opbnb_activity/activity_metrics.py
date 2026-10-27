@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from .decode import decimal_units
 from .analysis_stages import materialize, run_query
+from .system_transactions import TX_DAG_RECIPIENT
 
 
 COUNTS = """count(*) AS transactions,
@@ -117,14 +118,15 @@ def periods(result, store):
 
 
 def augment(connection, result, store):
-    connection.execute("""CREATE TEMP VIEW metric_activity AS SELECT *,
-        CASE WHEN is_system THEN 'system_l1_attributes' WHEN type=126 THEN 'user_deposit'
+    connection.execute(f"""CREATE TEMP VIEW metric_activity AS SELECT *,
+        CASE WHEN is_system AND recipient='{TX_DAG_RECIPIENT}' AND type=0 THEN 'system_tx_dag'
+             WHEN is_system THEN 'system_l1_attributes' WHEN type=126 THEN 'user_deposit'
              WHEN recipient IS NULL THEN 'contract_creation'
              WHEN input='0x' THEN 'empty_calldata'
-             WHEN NOT regexp_full_match(input,'0x([a-fA-F0-9]{2})*') OR input IS NULL THEN 'unknown'
+             WHEN NOT regexp_full_match(input,'0x([a-fA-F0-9]{{2}})*') OR input IS NULL THEN 'unknown'
              WHEN length(input)>=10 THEN 'selector_call' ELSE 'short_calldata' END AS transaction_type,
         CASE WHEN input='0x' THEN '0x'
-             WHEN length(input)>=10 AND regexp_full_match(input,'0x([a-fA-F0-9]{2})*')
+             WHEN length(input)>=10 AND regexp_full_match(input,'0x([a-fA-F0-9]{{2}})*')
              THEN lower(substr(input,1,10)) ELSE NULL END AS method_selector,
         floor(timestamp/3600)::BIGINT*3600 AS hour_epoch FROM activity""")
     daily = {row["day"]: row for row in rows(connection, f"SELECT day,{COUNTS} FROM activity GROUP BY day",

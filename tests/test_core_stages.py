@@ -61,7 +61,7 @@ def test_periods_count_window_users_once_and_include_system_only_periods(connect
     expected = {}
     for period in ("week", "month"):
         expected[period + "ly"] = records(connection.execute(f"""
-            SELECT cast(date_trunc('{period}', day::DATE) AS VARCHAR) AS period_start,
+            SELECT strftime(date_trunc('{period}', day::DATE), '%Y-%m-%d') AS period_start,
                 count(DISTINCT sender) FILTER (WHERE status=1 AND NOT is_system) AS active_senders,
                 count(DISTINCT sender) FILTER (WHERE NOT is_system) AS all_non_system_senders
             FROM activity GROUP BY period_start ORDER BY period_start"""))
@@ -77,6 +77,30 @@ def test_empty_activity(connection):
     assert unique_sender_counts(connection) == {
         "unique_successful_senders": 0, "unique_all_non_system_senders": 0}
     assert top_sender_transactions(connection, 1) == 0
+
+
+def test_period_keys_survive_calendar_coverage_and_keep_exact_deduplication(connection):
+    from types import SimpleNamespace
+
+    from opbnb_activity.activity_metrics import periods
+
+    prepare_core(connection)
+    result = period_tables(connection)
+    assert result["weekly"] == [
+        {"period_start": "2026-09-28", "active_senders": 2, "all_non_system_senders": 2},
+        {"period_start": "2026-10-05", "active_senders": 2, "all_non_system_senders": 3},
+    ]
+    assert result["monthly"] == [
+        {"period_start": "2026-09-01", "active_senders": 1, "all_non_system_senders": 1},
+        {"period_start": "2026-10-01", "active_senders": 2, "all_non_system_senders": 3},
+    ]
+    store = SimpleNamespace(config=SimpleNamespace(timezone="Asia/Shanghai"), manifest={
+        "start_utc": "2026-09-29T16:00:00+00:00", "end_utc": "2026-11-01T16:00:00+00:00"})
+    periods(result, store)
+    assert [row["active_senders"] for row in result["weekly"]] == [2, 2, 0, 0, 0]
+    assert [row["active_senders"] for row in result["monthly"]] == [1, 2, 0]
+    assert result["weekly"][0]["is_partial"] is True
+    assert result["monthly"][1]["is_partial"] is False
 
 
 def test_contract_limit_uses_all_transactions_before_successful_senders(connection):

@@ -15,6 +15,7 @@ from .labels import LabelIndex
 from .registry import prepare_inputs
 from .quality import validate
 from .storage import atomic_json, digest
+from .system_transactions import SYSTEM_RULES_VERSION
 
 
 def records(cursor):
@@ -126,7 +127,8 @@ def _analyze(connection, store, labels, assets, quality, save):
                           "timezone": store.config.timezone, "start_utc": store.manifest["start_utc"], "end_utc": store.manifest["end_utc"],
                           "dataset_version": hashlib.sha256("".join(digest(path / "_partition.json") for path in store.partition_dirs()).encode()).hexdigest(),
                           "labels_version": index.version, "assets_version": hashlib.sha256(json.dumps(assets, sort_keys=True).encode()).hexdigest(),
-                          "dataset": ".", "identity": store.config.identity, "analysis_engine": "disk_staged_v1"}
+                          "dataset": ".", "identity": store.config.identity, "analysis_engine": "disk_staged_v1",
+                          "system_rules_version": SYSTEM_RULES_VERSION}
     augment(connection, result, store)
     augment_attribution(connection, result)
     augment_result(connection, result, store, dict(provenance, labels=labels), assets)

@@ -30,6 +30,8 @@ nohup .venv/bin/opbnb-activity report --config config.toml --run-id mainnet-2026
 
 七天数据升级后的日贡献、高频发送方、失败样本及执行命令见 [离线归因使用说明](docs/2026-10-24-offline-attribution.md)。正常 `report` 不请求 RPC，不重采；新增统计需要原始 Parquet，不能只用旧报表反推。
 
+周/月活跃统计现统一使用日期键，分别按完整周期精确去重。已知主网 TxDAG 协议记录通过发送方、接收方、方法、零金额/零 gas price、成功回执和区块末尾位置组合识别，单列 `system_tx_dag` 并从非系统指标中排除；报告会重新识别旧 Parquet，无需重采、修改配置或原始文件。升级和复算命令见 [系统与周期统计修正](docs/2026-10-27-system-period-corrections.md)。
+
 进阶可选：仅当已有兼容 `getsourcecode`（`action`、`address` 参数）元数据服务 URL 时设置 `OPBNB_CONTRACT_API_URL`，命令会限量解析当前 ABI 候选。工具没有内置无需 key 的合约 API 承诺，也不要求申请/购买新 key；未设置时记录 `unavailable_no_api` 并保留 Unknown。不要将含凭据 URL 写进报告或版本控制。合约名/ABI、symbol/decimals 不单独证明项目或 ERC20 身份。
 
 ## 安装与离线体验

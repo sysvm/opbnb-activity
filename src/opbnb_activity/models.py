@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from .block_range import quantity
 from .config import SYSTEM_DEPOSITOR
+from .system_transactions import is_tx_dag
 
 TABLES = ("blocks", "transactions", "receipts", "logs")
 
@@ -68,6 +69,8 @@ def normalize_block(block, receipts, system_recipients, system_depositor=SYSTEM_
                                     "effective_gas_price_wei": gas_price, "l2_fee_wei": l2_fee,
                                     "l1_fee_wei": l1_fee, "total_fee_wei": total_fee,
                                     "contract_address": (receipt.get("contractAddress") or "").lower() or None})
+        if is_tx_dag(result["transactions"][-1], result["receipts"][-1], len(transactions)):
+            result["transactions"][-1].update(is_system=True, classification="system_tx_dag")
         seen_logs = set()
         for log in logs:
             log_index = quantity(log["logIndex"])
